@@ -3,10 +3,13 @@
 
 const path = require('path');
 const common = require('../common.js');
-const filename = path.resolve(process.env.NODE_TMPDIR || __dirname,
-                              `.removeme-benchmark-garbage-${process.pid}`);
 const fs = require('fs');
 const assert = require('assert');
+
+const tmpdir = require('../../test/common/tmpdir');
+tmpdir.refresh();
+const filename = path.resolve(tmpdir.path,
+                              `.removeme-benchmark-garbage-${process.pid}`);
 
 let encodingType, encoding, size, filesize;
 
@@ -49,7 +52,7 @@ function runTest() {
     bench.start();
   });
 
-  var bytes = 0;
+  let bytes = 0;
   rs.on('data', (chunk) => {
     bytes += chunk.length;
   });
@@ -65,7 +68,7 @@ function makeFile() {
   const buf = Buffer.allocUnsafe(filesize / 1024);
   if (encoding === 'utf8') {
     // ü
-    for (var i = 0; i < buf.length; i++) {
+    for (let i = 0; i < buf.length; i++) {
       buf[i] = i % 2 === 0 ? 0xC3 : 0xBC;
     }
   } else if (encoding === 'ascii') {
@@ -75,7 +78,7 @@ function makeFile() {
   }
 
   try { fs.unlinkSync(filename); } catch {}
-  var w = 1024;
+  let w = 1024;
   const ws = fs.createWriteStream(filename);
   ws.on('close', runTest);
   ws.on('drain', write);

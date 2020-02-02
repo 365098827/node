@@ -126,7 +126,7 @@ const unixTests = [
 const strictModeTests = [
   {
     send: 'ref = 1',
-    expect: ['Thrown:', /^ReferenceError:\s/]
+    expect: [/^Uncaught ReferenceError:\s/]
   }
 ];
 
@@ -134,11 +134,11 @@ const errorTests = [
   // Uncaught error throws and prints out
   {
     send: 'throw new Error(\'test error\');',
-    expect: ['Thrown:', 'Error: test error']
+    expect: ['Uncaught Error: test error']
   },
   {
     send: "throw { foo: 'bar' };",
-    expect: "Thrown: { foo: 'bar' }"
+    expect: "Uncaught { foo: 'bar' }"
   },
   // Common syntax error is treated as multiline command
   {
@@ -153,7 +153,7 @@ const errorTests = [
   // But passing the same string to eval() should throw
   {
     send: 'eval("function test_func() {")',
-    expect: ['Thrown:', /^SyntaxError: /]
+    expect: [/^Uncaught SyntaxError: /]
   },
   // Can handle multiline template literals
   {
@@ -210,89 +210,84 @@ const errorTests = [
   // should throw
   {
     send: 'JSON.parse(\'{invalid: \\\'json\\\'}\');',
-    expect: ['Thrown:', /^SyntaxError: /]
+    expect: [/^Uncaught SyntaxError: /]
   },
   // End of input to JSON.parse error is special case of syntax error,
   // should throw
   {
     send: 'JSON.parse(\'066\');',
-    expect: ['Thrown:', /^SyntaxError: /]
+    expect: [/^Uncaught SyntaxError: /]
   },
   // should throw
   {
     send: 'JSON.parse(\'{\');',
-    expect: ['Thrown:', /^SyntaxError: /]
+    expect: [/^Uncaught SyntaxError: /]
   },
   // invalid RegExps are a special case of syntax error,
   // should throw
   {
     send: '/(/;',
-    expect: ['Thrown:', /^SyntaxError: /]
+    expect: [/^Uncaught SyntaxError: /]
   },
   // invalid RegExp modifiers are a special case of syntax error,
   // should throw (GH-4012)
   {
     send: 'new RegExp("foo", "wrong modifier");',
-    expect: ['Thrown:', /^SyntaxError: /]
+    expect: [/^Uncaught SyntaxError: /]
   },
   // Strict mode syntax errors should be caught (GH-5178)
   {
     send: '(function() { "use strict"; return 0755; })()',
     expect: [
-      'Thrown:',
       kSource,
       kArrow,
       '',
-      /^SyntaxError: /
+      /^Uncaught SyntaxError: /
     ]
   },
   {
     send: '(function(a, a, b) { "use strict"; return a + b + c; })()',
     expect: [
-      'Thrown:',
       kSource,
       kArrow,
       '',
-      /^SyntaxError: /
+      /^Uncaught SyntaxError: /
     ]
   },
   {
     send: '(function() { "use strict"; with (this) {} })()',
     expect: [
-      'Thrown:',
       kSource,
       kArrow,
       '',
-      /^SyntaxError: /
+      /^Uncaught SyntaxError: /
     ]
   },
   {
     send: '(function() { "use strict"; var x; delete x; })()',
     expect: [
-      'Thrown:',
       kSource,
       kArrow,
       '',
-      /^SyntaxError: /
+      /^Uncaught SyntaxError: /
     ]
   },
   {
     send: '(function() { "use strict"; eval = 17; })()',
     expect: [
-      'Thrown:',
       kSource,
       kArrow,
       '',
-      /^SyntaxError: /
+      /^Uncaught SyntaxError: /
     ]
   },
   {
     send: '(function() { "use strict"; if (true) function f() { } })()',
     expect: [
-      'Thrown:',
       kSource,
       kArrow,
       '',
+      'Uncaught:',
       /^SyntaxError: /
     ]
   },
@@ -308,7 +303,7 @@ const errorTests = [
   // Functions should not evaluate twice (#2773)
   {
     send: 'var I = [1,2,3,function() {}]; I.pop()',
-    expect: '[Function]'
+    expect: '[Function (anonymous)]'
   },
   // Multiline object
   {
@@ -328,6 +323,21 @@ const errorTests = [
     send: '1 }',
     expect: '{ a: 1 }'
   },
+  // Multiline class with private member.
+  {
+    send: 'class Foo { #private = true ',
+    expect: '... '
+  },
+  // Class field with bigint.
+  {
+    send: 'num = 123456789n',
+    expect: '... '
+  },
+  // Static class features.
+  {
+    send: 'static foo = "bar" }',
+    expect: 'undefined'
+  },
   // Multiline anonymous function with comment
   {
     send: '(function() {',
@@ -338,12 +348,12 @@ const errorTests = [
     expect: '... '
   },
   {
-    send: 'return 1;',
+    send: 'return 1n;',
     expect: '... '
   },
   {
     send: '})()',
-    expect: '1'
+    expect: '1n'
   },
   // Multiline function call
   {
@@ -398,11 +408,10 @@ const errorTests = [
   {
     send: '[] \\',
     expect: [
-      'Thrown:',
       kSource,
       kArrow,
       '',
-      /^SyntaxError: /
+      /^Uncaught SyntaxError: /
     ]
   },
   // Do not fail when a String is created with line continuation
@@ -533,8 +542,7 @@ const errorTests = [
   {
     send: 'require("internal/repl")',
     expect: [
-      'Thrown:',
-      /^Error: Cannot find module 'internal\/repl'/,
+      /^Uncaught Error: Cannot find module 'internal\/repl'/,
       /^Require stack:/,
       /^- <repl>/,
       /^    at .*/,
@@ -572,11 +580,10 @@ const errorTests = [
   {
     send: 'a = 3.5e',
     expect: [
-      'Thrown:',
       kSource,
       kArrow,
       '',
-      /^SyntaxError: /
+      /^Uncaught SyntaxError: /
     ]
   },
   // Mitigate https://github.com/nodejs/node/issues/548
@@ -592,22 +599,20 @@ const errorTests = [
   {
     send: 'a = 3.5e',
     expect: [
-      'Thrown:',
       kSource,
       kArrow,
       '',
-      /^SyntaxError: /
+      /^Uncaught SyntaxError: /
     ]
   },
   // Avoid emitting stack trace
   {
     send: 'a = 3.5e',
     expect: [
-      'Thrown:',
       kSource,
       kArrow,
       '',
-      /^SyntaxError: /
+      /^Uncaught SyntaxError: /
     ]
   },
 
@@ -672,11 +677,10 @@ const errorTests = [
   {
     send: '...[]',
     expect: [
-      'Thrown:',
       kSource,
       kArrow,
       '',
-      /^SyntaxError: /
+      /^Uncaught SyntaxError: /
     ]
   },
   // Bring back the repl to prompt
@@ -687,31 +691,28 @@ const errorTests = [
   {
     send: 'console.log("Missing comma in arg list" process.version)',
     expect: [
-      'Thrown:',
       kSource,
       kArrow,
       '',
-      /^SyntaxError: /
+      /^Uncaught SyntaxError: /
     ]
   },
   {
     send: 'x = {\nfield\n{',
     expect: [
-      '... ... Thrown:',
-      '{',
+      '... ... {',
       kArrow,
       '',
-      /^SyntaxError: /
+      /^Uncaught SyntaxError: /
     ]
   },
   {
     send: '(2 + 3))',
     expect: [
-      'Thrown:',
       kSource,
       kArrow,
       '',
-      /^SyntaxError: /
+      /^Uncaught SyntaxError: /
     ]
   },
   {
@@ -725,11 +726,10 @@ const errorTests = [
   {
     send: '} else {',
     expect: [
-      'Thrown:',
       kSource,
       kArrow,
       '',
-      /^SyntaxError: /
+      /^Uncaught SyntaxError: /
     ]
   },
 ];

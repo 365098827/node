@@ -1,5 +1,6 @@
 #include "worker_inspector.h"
 #include "main_thread_interface.h"
+#include "util-inl.h"
 
 #include <memory>
 
@@ -69,6 +70,12 @@ void ParentInspectorHandle::WorkerStarted(
   std::unique_ptr<Request> request(
       new WorkerStartedRequest(id_, url_, worker_thread, waiting));
   parent_thread_->Post(std::move(request));
+}
+
+std::unique_ptr<inspector::InspectorSession> ParentInspectorHandle::Connect(
+    std::unique_ptr<inspector::InspectorSessionDelegate> delegate,
+    bool prevent_shutdown) {
+  return parent_thread_->Connect(std::move(delegate), prevent_shutdown);
 }
 
 void WorkerManager::WorkerFinished(int session_id) {

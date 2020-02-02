@@ -1,6 +1,6 @@
 'use strict';
-const assert = require('assert');
 const common = require('../common');
+const assert = require('assert');
 
 const b = Buffer.from('abcdef');
 const buf_a = Buffer.from('a');
@@ -277,13 +277,14 @@ for (let lengthIndex = 0; lengthIndex < lengths.length; lengthIndex++) {
   {},
   []
 ].forEach((val) => {
-  common.expectsError(
+  assert.throws(
     () => b.includes(val),
     {
       code: 'ERR_INVALID_ARG_TYPE',
-      type: TypeError,
-      message: 'The "value" argument must be one of type string, ' +
-               `Buffer, or Uint8Array. Received type ${typeof val}`
+      name: 'TypeError',
+      message: 'The "value" argument must be one of type number or string ' +
+               'or an instance of Buffer or Uint8Array.' +
+               common.invalidArgTypeHelper(val)
     }
   );
 });

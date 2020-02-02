@@ -24,8 +24,21 @@
 
 #if defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 
+#include <cmath>
 #include <cstring>
 #include "util.h"
+
+// These are defined by <sys/byteorder.h> or <netinet/in.h> on some systems.
+// To avoid warnings, undefine them before redefining them.
+#ifdef BSWAP_2
+# undef BSWAP_2
+#endif
+#ifdef BSWAP_4
+# undef BSWAP_4
+#endif
+#ifdef BSWAP_8
+# undef BSWAP_8
+#endif
 
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -485,6 +498,13 @@ ArrayBufferViewContents<T, S>::ArrayBufferViewContents(
 
 template <typename T, size_t S>
 ArrayBufferViewContents<T, S>::ArrayBufferViewContents(
+    v8::Local<v8::Object> value) {
+  CHECK(value->IsArrayBufferView());
+  Read(value.As<v8::ArrayBufferView>());
+}
+
+template <typename T, size_t S>
+ArrayBufferViewContents<T, S>::ArrayBufferViewContents(
     v8::Local<v8::ArrayBufferView> abv) {
   Read(abv);
 }
@@ -494,12 +514,23 @@ void ArrayBufferViewContents<T, S>::Read(v8::Local<v8::ArrayBufferView> abv) {
   static_assert(sizeof(T) == 1, "Only supports one-byte data at the moment");
   length_ = abv->ByteLength();
   if (length_ > sizeof(stack_storage_) || abv->HasBuffer()) {
-    data_ = static_cast<T*>(abv->Buffer()->GetContents().Data()) +
+    data_ = static_cast<T*>(abv->Buffer()->GetBackingStore()->Data()) +
         abv->ByteOffset();
   } else {
     abv->CopyContents(stack_storage_, sizeof(stack_storage_));
     data_ = stack_storage_;
   }
+}
+
+// ECMA262 20.1.2.5
+inline bool IsSafeJsInt(v8::Local<v8::Value> v) {
+  if (!v->IsNumber()) return false;
+  double v_d = v.As<v8::Number>()->Value();
+  if (std::isnan(v_d)) return false;
+  if (std::isinf(v_d)) return false;
+  if (std::trunc(v_d) != v_d) return false;  // not int
+  if (std::abs(v_d) <= static_cast<double>(kMaxSafeJsInteger)) return true;
+  return false;
 }
 
 }  // namespace node

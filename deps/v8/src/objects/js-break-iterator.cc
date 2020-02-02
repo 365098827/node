@@ -15,9 +15,9 @@
 namespace v8 {
 namespace internal {
 
-MaybeHandle<JSV8BreakIterator> JSV8BreakIterator::Initialize(
-    Isolate* isolate, Handle<JSV8BreakIterator> break_iterator_holder,
-    Handle<Object> locales, Handle<Object> options_obj) {
+MaybeHandle<JSV8BreakIterator> JSV8BreakIterator::New(
+    Isolate* isolate, Handle<Map> map, Handle<Object> locales,
+    Handle<Object> options_obj, const char* service) {
   Factory* factory = isolate->factory();
 
   // 1. Let requestedLocales be ? CanonicalizeLocaleList(locales).
@@ -31,15 +31,14 @@ MaybeHandle<JSV8BreakIterator> JSV8BreakIterator::Initialize(
   if (options_obj->IsUndefined(isolate)) {
     options = factory->NewJSObjectWithNullProto();
   } else {
-    ASSIGN_RETURN_ON_EXCEPTION(
-        isolate, options,
-        Object::ToObject(isolate, options_obj, "Intl.JSV8BreakIterator"),
-        JSV8BreakIterator);
+    ASSIGN_RETURN_ON_EXCEPTION(isolate, options,
+                               Object::ToObject(isolate, options_obj, service),
+                               JSV8BreakIterator);
   }
 
   // Extract locale string
   Maybe<Intl::MatcherOption> maybe_locale_matcher =
-      Intl::GetLocaleMatcher(isolate, options, "Intl.JSV8BreakIterator");
+      Intl::GetLocaleMatcher(isolate, options, service);
   MAYBE_RETURN(maybe_locale_matcher, MaybeHandle<JSV8BreakIterator>());
   Intl::MatcherOption matcher = maybe_locale_matcher.FromJust();
 
@@ -49,7 +48,7 @@ MaybeHandle<JSV8BreakIterator> JSV8BreakIterator::Initialize(
 
   // Extract type from options
   Maybe<Type> maybe_type = Intl::GetStringOption<Type>(
-      isolate, options, "type", "Intl.v8BreakIterator",
+      isolate, options, "type", service,
       {"word", "character", "sentence", "line"},
       {Type::WORD, Type::CHARACTER, Type::SENTENCE, Type::LINE}, Type::WORD);
   MAYBE_RETURN(maybe_type, MaybeHandle<JSV8BreakIterator>());
@@ -96,8 +95,13 @@ MaybeHandle<JSV8BreakIterator> JSV8BreakIterator::Initialize(
 
   Handle<String> locale_str =
       isolate->factory()->NewStringFromAsciiChecked(r.locale.c_str());
-  break_iterator_holder->set_locale(*locale_str);
 
+  // Now all properties are ready, so we can allocate the result object.
+  Handle<JSV8BreakIterator> break_iterator_holder =
+      Handle<JSV8BreakIterator>::cast(
+          isolate->factory()->NewFastOrSlowJSObjectFromMap(map));
+  DisallowHeapAllocation no_gc;
+  break_iterator_holder->set_locale(*locale_str);
   break_iterator_holder->set_type(type_enum);
   break_iterator_holder->set_break_iterator(*managed_break_iterator);
   break_iterator_holder->set_unicode_string(*managed_unicode_string);
@@ -124,11 +128,11 @@ void JSV8BreakIterator::AdoptText(
     Isolate* isolate, Handle<JSV8BreakIterator> break_iterator_holder,
     Handle<String> text) {
   icu::BreakIterator* break_iterator =
-      break_iterator_holder->break_iterator()->raw();
+      break_iterator_holder->break_iterator().raw();
   CHECK_NOT_NULL(break_iterator);
-  Managed<icu::UnicodeString> unicode_string =
+  Handle<Managed<icu::UnicodeString>> unicode_string =
       Intl::SetTextToBreakIterator(isolate, text, break_iterator);
-  break_iterator_holder->set_unicode_string(unicode_string);
+  break_iterator_holder->set_unicode_string(*unicode_string);
 }
 
 Handle<String> JSV8BreakIterator::TypeAsString() const {
@@ -141,32 +145,31 @@ Handle<String> JSV8BreakIterator::TypeAsString() const {
       return GetReadOnlyRoots().sentence_string_handle();
     case Type::LINE:
       return GetReadOnlyRoots().line_string_handle();
-    case Type::COUNT:
-      UNREACHABLE();
   }
+  UNREACHABLE();
 }
 
 Handle<Object> JSV8BreakIterator::Current(
     Isolate* isolate, Handle<JSV8BreakIterator> break_iterator) {
   return isolate->factory()->NewNumberFromInt(
-      break_iterator->break_iterator()->raw()->current());
+      break_iterator->break_iterator().raw()->current());
 }
 
 Handle<Object> JSV8BreakIterator::First(
     Isolate* isolate, Handle<JSV8BreakIterator> break_iterator) {
   return isolate->factory()->NewNumberFromInt(
-      break_iterator->break_iterator()->raw()->first());
+      break_iterator->break_iterator().raw()->first());
 }
 
 Handle<Object> JSV8BreakIterator::Next(
     Isolate* isolate, Handle<JSV8BreakIterator> break_iterator) {
   return isolate->factory()->NewNumberFromInt(
-      break_iterator->break_iterator()->raw()->next());
+      break_iterator->break_iterator().raw()->next());
 }
 
 String JSV8BreakIterator::BreakType(Isolate* isolate,
                                     Handle<JSV8BreakIterator> break_iterator) {
-  int32_t status = break_iterator->break_iterator()->raw()->getRuleStatus();
+  int32_t status = break_iterator->break_iterator().raw()->getRuleStatus();
   // Keep return values in sync with JavaScript BreakType enum.
   if (status >= UBRK_WORD_NONE && status < UBRK_WORD_NONE_LIMIT) {
     return ReadOnlyRoots(isolate).none_string();

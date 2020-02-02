@@ -1,8 +1,12 @@
-
+#include "env-inl.h"
 #include "node_report.h"
-#include "debug_utils.h"
+#include "debug_utils-inl.h"
+#include "diagnosticfilename-inl.h"
 #include "node_internals.h"
 #include "node_metadata.h"
+#include "node_mutex.h"
+#include "node_worker.h"
+#include "util.h"
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -16,31 +20,21 @@
 #include <ctime>
 #include <cwctype>
 #include <fstream>
-#include <iomanip>
-#include <climits>  // PATH_MAX
 
-#ifdef _WIN32
-/* MAX_PATH is in characters, not bytes. Make sure we have enough headroom. */
-#define PATH_MAX_BYTES (MAX_PATH * 4)
-#else
-#define PATH_MAX_BYTES (PATH_MAX)
-#endif
-
-#ifndef _WIN32
-extern char** environ;
-#endif
-
+constexpr int NODE_REPORT_VERSION = 2;
 constexpr int NANOS_PER_SEC = 1000 * 1000 * 1000;
 constexpr double SEC_PER_MICROS = 1e-6;
 
 namespace report {
 using node::arraysize;
+using node::ConditionVariable;
 using node::DiagnosticFilename;
 using node::Environment;
 using node::Mutex;
 using node::NativeSymbolDebuggingContext;
 using node::PerIsolateOptions;
 using node::TIME_TYPE;
+using node::worker::Worker;
 using v8::HeapSpaceStatistics;
 using v8::HeapStatistics;
 using v8::Isolate;
@@ -71,6 +65,8 @@ static void PrintSystemInformation(JSONWriter* writer);
 static void PrintLoadedLibraries(JSONWriter* writer);
 static void PrintComponentVersions(JSONWriter* writer);
 static void PrintRelease(JSONWriter* writer);
+static void PrintCpuInfo(JSONWriter* writer);
+static void PrintNetworkInterfaceInfo(JSONWriter* writer);
 
 // External function to trigger a report, writing to file.
 // The 'name' parameter is in/out: an input filename is used
@@ -110,7 +106,7 @@ std::string TriggerNodeReport(Isolate* isolate,
     // Regular file. Append filename to directory path if one was specified
     if (env != nullptr && options->report_directory.length() > 0) {
       std::string pathname = options->report_directory;
-      pathname += PATHSEP;
+      pathname += node::kPathSeparator;
       pathname += filename;
       outfile.open(pathname, std::ios::out | std::ios::binary);
     } else {
@@ -118,8 +114,7 @@ std::string TriggerNodeReport(Isolate* isolate,
     }
     // Check for errors on the file open
     if (!outfile.is_open()) {
-      std::cerr << std::endl
-                << "Failed to open Node.js report file: " << filename;
+      std::cerr << "\nFailed to open Node.js report file: " << filename;
 
       if (env != nullptr && options->report_directory.length() > 0)
         std::cerr << " directory: " << options->report_directory;
@@ -128,7 +123,7 @@ std::string TriggerNodeReport(Isolate* isolate,
       return "";
     }
     outstream = &outfile;
-    std::cerr << std::endl << "Writing Node.js report to file: " << filename;
+    std::cerr << "\nWriting Node.js report to file: " << filename;
   }
 
   WriteNodeReport(isolate, env, message, trigger, filename, *outstream,
@@ -139,7 +134,7 @@ std::string TriggerNodeReport(Isolate* isolate,
     outfile.close();
   }
 
-  std::cerr << std::endl << "Node.js report completed" << std::endl;
+  std::cerr << "\nNode.js report completed" << std::endl;
   return filename;
 }
 
@@ -177,7 +172,7 @@ static void WriteNodeReport(Isolate* isolate,
   JSONWriter writer(out);
   writer.json_start();
   writer.json_objectstart("header");
-
+  writer.json_keyvalue("reportVersion", NODE_REPORT_VERSION);
   writer.json_keyvalue("event", message);
   writer.json_keyvalue("trigger", trigger);
   if (!filename.empty())
@@ -219,6 +214,10 @@ static void WriteNodeReport(Isolate* isolate,
 
   // Report native process ID
   writer.json_keyvalue("processId", pid);
+  if (env != nullptr)
+    writer.json_keyvalue("threadId", env->thread_id());
+  else
+    writer.json_keyvalue("threadId", JSONWriter::Null{});
 
   {
     // Report the process cwd.
@@ -231,7 +230,7 @@ static void WriteNodeReport(Isolate* isolate,
   // Report out the command line.
   if (!node::per_process::cli_options->cmdline.empty()) {
     writer.json_arraystart("commandLine");
-    for (std::string arg : node::per_process::cli_options->cmdline) {
+    for (const std::string& arg : node::per_process::cli_options->cmdline) {
       writer.json_element(arg);
     }
     writer.json_arrayend();
@@ -266,6 +265,39 @@ static void WriteNodeReport(Isolate* isolate,
     writer.json_end();
   }
 
+  writer.json_arrayend();
+
+  writer.json_arraystart("workers");
+  if (env != nullptr) {
+    Mutex workers_mutex;
+    ConditionVariable notify;
+    std::vector<std::string> worker_infos;
+    size_t expected_results = 0;
+
+    env->ForEachWorker([&](Worker* w) {
+      expected_results += w->RequestInterrupt([&](Environment* env) {
+        std::ostringstream os;
+
+        GetNodeReport(env->isolate(),
+                      env,
+                      "Worker thread subreport",
+                      trigger,
+                      Local<String>(),
+                      os);
+
+        Mutex::ScopedLock lock(workers_mutex);
+        worker_infos.emplace_back(os.str());
+        notify.Signal(lock);
+      });
+    });
+
+    Mutex::ScopedLock lock(workers_mutex);
+    worker_infos.reserve(expected_results);
+    while (worker_infos.size() < expected_results)
+      notify.Wait(lock);
+    for (const std::string& worker_info : worker_infos)
+      writer.json_element(JSONWriter::ForeignJSON { worker_info });
+  }
   writer.json_arrayend();
 
   // Report operating system information
@@ -321,11 +353,87 @@ static void PrintVersionInformation(JSONWriter* writer) {
     writer->json_keyvalue("osMachine", os_info.machine);
   }
 
+  PrintCpuInfo(writer);
+  PrintNetworkInterfaceInfo(writer);
+
   char host[UV_MAXHOSTNAMESIZE];
   size_t host_size = sizeof(host);
 
   if (uv_os_gethostname(host, &host_size) == 0)
     writer->json_keyvalue("host", host);
+}
+
+// Report CPU info
+static void PrintCpuInfo(JSONWriter* writer) {
+  uv_cpu_info_t* cpu_info;
+  int count;
+  if (uv_cpu_info(&cpu_info, &count) == 0) {
+    writer->json_arraystart("cpus");
+    for (int i = 0; i < count; i++) {
+      writer->json_start();
+      writer->json_keyvalue("model", cpu_info[i].model);
+      writer->json_keyvalue("speed", cpu_info[i].speed);
+      writer->json_keyvalue("user", cpu_info[i].cpu_times.user);
+      writer->json_keyvalue("nice", cpu_info[i].cpu_times.nice);
+      writer->json_keyvalue("sys", cpu_info[i].cpu_times.sys);
+      writer->json_keyvalue("idle", cpu_info[i].cpu_times.idle);
+      writer->json_keyvalue("irq", cpu_info[i].cpu_times.irq);
+      writer->json_end();
+    }
+    writer->json_arrayend();
+    uv_free_cpu_info(cpu_info, count);
+  }
+}
+
+static void PrintNetworkInterfaceInfo(JSONWriter* writer) {
+  uv_interface_address_t* interfaces;
+  char ip[INET6_ADDRSTRLEN];
+  char netmask[INET6_ADDRSTRLEN];
+  char mac[18];
+  int count;
+
+  if (uv_interface_addresses(&interfaces, &count) == 0) {
+    writer->json_arraystart("networkInterfaces");
+
+    for (int i = 0; i < count; i++) {
+      writer->json_start();
+      writer->json_keyvalue("name", interfaces[i].name);
+      writer->json_keyvalue("internal", !!interfaces[i].is_internal);
+      snprintf(mac,
+               sizeof(mac),
+               "%02x:%02x:%02x:%02x:%02x:%02x",
+               static_cast<unsigned char>(interfaces[i].phys_addr[0]),
+               static_cast<unsigned char>(interfaces[i].phys_addr[1]),
+               static_cast<unsigned char>(interfaces[i].phys_addr[2]),
+               static_cast<unsigned char>(interfaces[i].phys_addr[3]),
+               static_cast<unsigned char>(interfaces[i].phys_addr[4]),
+               static_cast<unsigned char>(interfaces[i].phys_addr[5]));
+      writer->json_keyvalue("mac", mac);
+
+      if (interfaces[i].address.address4.sin_family == AF_INET) {
+        uv_ip4_name(&interfaces[i].address.address4, ip, sizeof(ip));
+        uv_ip4_name(&interfaces[i].netmask.netmask4, netmask, sizeof(netmask));
+        writer->json_keyvalue("address", ip);
+        writer->json_keyvalue("netmask", netmask);
+        writer->json_keyvalue("family", "IPv4");
+      } else if (interfaces[i].address.address4.sin_family == AF_INET6) {
+        uv_ip6_name(&interfaces[i].address.address6, ip, sizeof(ip));
+        uv_ip6_name(&interfaces[i].netmask.netmask6, netmask, sizeof(netmask));
+        writer->json_keyvalue("address", ip);
+        writer->json_keyvalue("netmask", netmask);
+        writer->json_keyvalue("family", "IPv6");
+        writer->json_keyvalue("scopeid",
+                              interfaces[i].address.address6.sin6_scope_id);
+      } else {
+        writer->json_keyvalue("family", "unknown");
+      }
+
+      writer->json_end();
+    }
+
+    writer->json_arrayend();
+    uv_free_interface_addresses(interfaces, count);
+  }
 }
 
 // Report the JavaScript stack.
@@ -346,7 +454,6 @@ static void PrintJavaScriptStack(JSONWriter* writer,
   int line = ss.find('\n');
   if (line == -1) {
     writer->json_keyvalue("message", ss);
-    writer->json_objectend();
   } else {
     std::string l = ss.substr(0, line);
     writer->json_keyvalue("message", l);
@@ -362,8 +469,8 @@ static void PrintJavaScriptStack(JSONWriter* writer,
       ss = ss.substr(line + 1);
       line = ss.find('\n');
     }
+    writer->json_arrayend();
   }
-  writer->json_arrayend();
   writer->json_objectend();
 }
 
@@ -480,6 +587,26 @@ static void PrintResourceUsage(JSONWriter* writer) {
 
 // Report operating system information.
 static void PrintSystemInformation(JSONWriter* writer) {
+  uv_env_item_t* envitems;
+  int envcount;
+  int r;
+
+  writer->json_objectstart("environmentVariables");
+
+  {
+    Mutex::ScopedLock lock(node::per_process::env_var_mutex);
+    r = uv_os_environ(&envitems, &envcount);
+  }
+
+  if (r == 0) {
+    for (int i = 0; i < envcount; i++)
+      writer->json_keyvalue(envitems[i].name, envitems[i].value);
+
+    uv_os_free_environ(envitems, envcount);
+  }
+
+  writer->json_objectend();
+
 #ifndef _WIN32
   static struct {
     const char* description;
@@ -500,47 +627,10 @@ static void PrintSystemInformation(JSONWriter* writer) {
 #ifndef __sun
     {"max_user_processes", RLIMIT_NPROC},
 #endif
+#ifndef __OpenBSD__
     {"virtual_memory_kbytes", RLIMIT_AS}
+#endif
   };
-#endif  // _WIN32
-  writer->json_objectstart("environmentVariables");
-  Mutex::ScopedLock lock(node::per_process::env_var_mutex);
-#ifdef _WIN32
-  LPWSTR lpszVariable;
-  LPWCH lpvEnv;
-
-  // Get pointer to the environment block
-  lpvEnv = GetEnvironmentStringsW();
-  if (lpvEnv != nullptr) {
-    // Variable strings are separated by null bytes,
-    // and the block is terminated by a null byte.
-    lpszVariable = reinterpret_cast<LPWSTR>(lpvEnv);
-    while (*lpszVariable) {
-      DWORD size = WideCharToMultiByte(
-          CP_UTF8, 0, lpszVariable, -1, nullptr, 0, nullptr, nullptr);
-      char* str = new char[size];
-      WideCharToMultiByte(
-          CP_UTF8, 0, lpszVariable, -1, str, size, nullptr, nullptr);
-      std::string env(str);
-      int sep = env.rfind('=');
-      std::string key = env.substr(0, sep);
-      std::string value = env.substr(sep + 1);
-      writer->json_keyvalue(key, value);
-      lpszVariable += lstrlenW(lpszVariable) + 1;
-    }
-    FreeEnvironmentStringsW(lpvEnv);
-  }
-  writer->json_objectend();
-#else
-  std::string pair;
-  for (char** env = environ; *env != nullptr; ++env) {
-    std::string pair(*env);
-    int separator = pair.find('=');
-    std::string key = pair.substr(0, separator);
-    std::string str = pair.substr(separator + 1);
-    writer->json_keyvalue(key, str);
-  }
-  writer->json_objectend();
 
   writer->json_objectstart("userLimits");
   struct rlimit limit;
@@ -564,7 +654,7 @@ static void PrintSystemInformation(JSONWriter* writer) {
     }
   }
   writer->json_objectend();
-#endif
+#endif  // _WIN32
 
   PrintLoadedLibraries(writer);
 }

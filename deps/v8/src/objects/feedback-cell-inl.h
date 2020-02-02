@@ -8,7 +8,7 @@
 #include "src/objects/feedback-cell.h"
 
 #include "src/heap/heap-write-barrier-inl.h"
-#include "src/objects-inl.h"
+#include "src/objects/objects-inl.h"
 #include "src/objects/struct-inl.h"
 
 // Has to be the last include (doesn't have include guards):
@@ -17,11 +17,19 @@
 namespace v8 {
 namespace internal {
 
-OBJECT_CONSTRUCTORS_IMPL(FeedbackCell, Struct)
+TQ_OBJECT_CONSTRUCTORS_IMPL(FeedbackCell)
 
-CAST_ACCESSOR(FeedbackCell)
+void FeedbackCell::clear_padding() {
+  if (FeedbackCell::kAlignedSize == FeedbackCell::kUnalignedSize) return;
+  DCHECK_GE(FeedbackCell::kAlignedSize, FeedbackCell::kUnalignedSize);
+  memset(reinterpret_cast<byte*>(address() + FeedbackCell::kUnalignedSize), 0,
+         FeedbackCell::kAlignedSize - FeedbackCell::kUnalignedSize);
+}
 
-ACCESSORS(FeedbackCell, value, HeapObject, kValueOffset)
+void FeedbackCell::reset() {
+  set_value(GetReadOnlyRoots().undefined_value());
+  set_interrupt_budget(FeedbackCell::GetInitialInterruptBudget());
+}
 
 }  // namespace internal
 }  // namespace v8

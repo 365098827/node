@@ -14,11 +14,16 @@
   V(CompactionFullAbortedPage)                            \
   V(CompactionPartiallyAbortedPage)                       \
   V(CompactionPartiallyAbortedPageIntraAbortedPointers)   \
+  V(CompactionPartiallyAbortedPageWithInvalidatedSlots)   \
   V(CompactionPartiallyAbortedPageWithStoreBufferEntries) \
   V(CompactionSpaceDivideMultiplePages)                   \
   V(CompactionSpaceDivideSinglePage)                      \
   V(InvalidatedSlotsAfterTrimming)                        \
   V(InvalidatedSlotsAllInvalidatedRanges)                 \
+  V(InvalidatedSlotsCleanupEachObject)                    \
+  V(InvalidatedSlotsCleanupFull)                          \
+  V(InvalidatedSlotsCleanupRightTrim)                     \
+  V(InvalidatedSlotsCleanupOverlapRight)                  \
   V(InvalidatedSlotsEvacuationCandidate)                  \
   V(InvalidatedSlotsNoInvalidatedRanges)                  \
   V(InvalidatedSlotsResetObjectRegression)                \
@@ -97,12 +102,13 @@ class HeapTester {
 
   // test-heap.cc
   static AllocationResult AllocateByteArrayForTest(Heap* heap, int length,
-                                                   PretenureFlag pretenure);
+                                                   AllocationType allocation);
+  static bool CodeEnsureLinearAllocationArea(Heap* heap, int size_in_bytes);
 
   // test-mark-compact.cc
   static AllocationResult AllocateMapForTest(v8::internal::Isolate* isolate);
   static AllocationResult AllocateFixedArrayForTest(Heap* heap, int length,
-                                                    PretenureFlag pretenure);
+                                                    AllocationType allocation);
 
   static void UncommitFromSpace(Heap* heap);
 };

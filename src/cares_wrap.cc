@@ -23,6 +23,7 @@
 #include "ares.h"
 #include "async_wrap-inl.h"
 #include "env-inl.h"
+#include "memory_tracker-inl.h"
 #include "node.h"
 #include "req_wrap-inl.h"
 #include "util-inl.h"
@@ -574,10 +575,6 @@ class QueryWrap : public AsyncWrap {
       : AsyncWrap(channel->env(), req_wrap_obj, AsyncWrap::PROVIDER_QUERYWRAP),
         channel_(channel),
         trace_name_(name) {
-    // Make sure the channel object stays alive during the query lifetime.
-    req_wrap_obj->Set(env()->context(),
-                      env()->channel_string(),
-                      channel->object()).Check();
   }
 
   ~QueryWrap() override {
@@ -630,8 +627,6 @@ class QueryWrap : public AsyncWrap {
     } else {
       Parse(response_data_->host.get());
     }
-
-    delete this;
   }
 
   void* MakeCallbackPointer() {
@@ -689,9 +684,13 @@ class QueryWrap : public AsyncWrap {
   }
 
   void QueueResponseCallback(int status) {
-    env()->SetImmediate([](Environment*, void* data) {
-      static_cast<QueryWrap*>(data)->AfterResponse();
-    }, this, object());
+    BaseObjectPtr<QueryWrap> strong_ref{this};
+    env()->SetImmediate([this, strong_ref](Environment*) {
+      AfterResponse();
+
+      // Delete once strong_ref goes out of scope.
+      Detach();
+    });
 
     channel_->set_query_last_ok(status != ARES_ECONNREFUSED);
     channel_->ModifyActivityQueryCount(-1);
@@ -734,7 +733,7 @@ class QueryWrap : public AsyncWrap {
     UNREACHABLE();
   }
 
-  ChannelWrap* channel_;
+  BaseObjectPtr<ChannelWrap> channel_;
 
  private:
   std::unique_ptr<ResponseData> response_data_;
@@ -755,7 +754,7 @@ Local<Array> AddrTTLToArray(Environment* env,
 
   Local<Array> ttls = Array::New(isolate, naddrttls);
   for (size_t i = 0; i < naddrttls; i++) {
-    auto value = Integer::New(isolate, addrttls[i].ttl);
+    auto value = Integer::NewFromUnsigned(isolate, addrttls[i].ttl);
     ttls->Set(context, i, value).Check();
   }
 
@@ -905,7 +904,8 @@ int ParseTxtReply(Environment* env,
   uint32_t i = 0, j;
   uint32_t offset = ret->Length();
   for (j = 0; current != nullptr; current = current->next) {
-    Local<String> txt = OneByteString(env->isolate(), current->txt);
+    Local<String> txt =
+        OneByteString(env->isolate(), current->txt, current->length);
 
     // New record found - write out the current chunk
     if (current->record_start) {
@@ -1138,7 +1138,7 @@ int ParseSoaReply(Environment* env,
                                     hostmaster.get())).Check();
       soa_record->Set(context,
                       env->serial_string(),
-                      Integer::New(env->isolate(), serial)).Check();
+                      Integer::NewFromUnsigned(env->isolate(), serial)).Check();
       soa_record->Set(context,
                       env->refresh_string(),
                       Integer::New(env->isolate(), refresh)).Check();
@@ -1150,7 +1150,7 @@ int ParseSoaReply(Environment* env,
                       Integer::New(env->isolate(), expire)).Check();
       soa_record->Set(context,
                       env->minttl_string(),
-                      Integer::New(env->isolate(), minttl)).Check();
+                      Integer::NewFromUnsigned(env->isolate(), minttl)).Check();
       soa_record->Set(context,
                       env->type_string(),
                       env->dns_soa_string()).Check();
@@ -1218,7 +1218,8 @@ class QueryAnyWrap: public QueryWrap {
                  ret->Get(context, i).ToLocalChecked()).Check();
         obj->Set(context,
                  env()->ttl_string(),
-                 Integer::New(env()->isolate(), addrttls[i].ttl)).Check();
+                 Integer::NewFromUnsigned(
+                   env()->isolate(), addrttls[i].ttl)).Check();
         obj->Set(context,
                  env()->type_string(),
                  env()->dns_a_string()).Check();
@@ -1264,8 +1265,8 @@ class QueryAnyWrap: public QueryWrap {
                ret->Get(context, i).ToLocalChecked()).Check();
       obj->Set(context,
                env()->ttl_string(),
-               Integer::New(env()->isolate(), addr6ttls[i - a_count].ttl))
-          .Check();
+               Integer::NewFromUnsigned(
+                 env()->isolate(), addr6ttls[i - a_count].ttl)).Check();
       obj->Set(context,
                env()->type_string(),
                env()->dns_aaaa_string()).Check();
@@ -1708,7 +1709,8 @@ class QuerySoaWrap: public QueryWrap {
                                   soa_out->hostmaster)).Check();
     soa_record->Set(context,
                     env()->serial_string(),
-                    Integer::New(env()->isolate(), soa_out->serial)).Check();
+                    Integer::NewFromUnsigned(
+                      env()->isolate(), soa_out->serial)).Check();
     soa_record->Set(context,
                     env()->refresh_string(),
                     Integer::New(env()->isolate(),
@@ -1721,7 +1723,8 @@ class QuerySoaWrap: public QueryWrap {
                     Integer::New(env()->isolate(), soa_out->expire)).Check();
     soa_record->Set(context,
                     env()->minttl_string(),
-                    Integer::New(env()->isolate(), soa_out->minttl)).Check();
+                    Integer::NewFromUnsigned(
+                      env()->isolate(), soa_out->minttl)).Check();
 
     ares_free_data(soa_out);
 

@@ -1,13 +1,11 @@
 // This test is designed to fail with a segmentation fault in Node.js 4.1.0 and
 // execute without issues in Node.js 4.1.1 and up.
 
-// Flags: --expose-internals
 'use strict';
 const common = require('../common');
 const assert = require('assert');
 const httpCommon = require('_http_common');
 const { HTTPParser } = require('_http_common');
-const { AsyncResource } = require('async_hooks');
 const net = require('net');
 
 const COUNT = httpCommon.parsers.max + 1;
@@ -25,7 +23,7 @@ function execAndClose() {
   process.stdout.write('.');
 
   const parser = parsers.pop();
-  parser.initialize(HTTPParser.RESPONSE, new AsyncResource('ClientRequest'));
+  parser.initialize(HTTPParser.RESPONSE, {});
 
   const socket = net.connect(common.PORT);
   socket.on('error', (e) => {

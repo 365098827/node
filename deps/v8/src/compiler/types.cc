@@ -6,9 +6,10 @@
 
 #include "src/compiler/types.h"
 
-#include "src/handles-inl.h"
-#include "src/objects-inl.h"
-#include "src/ostreams.h"
+#include "src/handles/handles-inl.h"
+#include "src/objects/instance-type.h"
+#include "src/objects/objects-inl.h"
+#include "src/utils/ostreams.h"
 
 namespace v8 {
 namespace internal {
@@ -182,7 +183,7 @@ Type::bitset BitsetType::Lub(const MapRefLike& map) {
     case HEAP_NUMBER_TYPE:
       return kNumber;
     case JS_OBJECT_TYPE:
-    case JS_ARGUMENTS_TYPE:
+    case JS_ARGUMENTS_OBJECT_TYPE:
     case JS_ERROR_TYPE:
     case JS_GLOBAL_OBJECT_TYPE:
     case JS_GLOBAL_PROXY_TYPE:
@@ -202,20 +203,20 @@ Type::bitset BitsetType::Lub(const MapRefLike& map) {
       return kOtherObject;
     case JS_ARRAY_TYPE:
       return kArray;
-    case JS_VALUE_TYPE:
+    case JS_PRIMITIVE_WRAPPER_TYPE:
     case JS_MESSAGE_OBJECT_TYPE:
     case JS_DATE_TYPE:
 #ifdef V8_INTL_SUPPORT
-    case JS_INTL_V8_BREAK_ITERATOR_TYPE:
-    case JS_INTL_COLLATOR_TYPE:
-    case JS_INTL_DATE_TIME_FORMAT_TYPE:
-    case JS_INTL_LIST_FORMAT_TYPE:
-    case JS_INTL_LOCALE_TYPE:
-    case JS_INTL_NUMBER_FORMAT_TYPE:
-    case JS_INTL_PLURAL_RULES_TYPE:
-    case JS_INTL_RELATIVE_TIME_FORMAT_TYPE:
-    case JS_INTL_SEGMENT_ITERATOR_TYPE:
-    case JS_INTL_SEGMENTER_TYPE:
+    case JS_V8_BREAK_ITERATOR_TYPE:
+    case JS_COLLATOR_TYPE:
+    case JS_DATE_TIME_FORMAT_TYPE:
+    case JS_LIST_FORMAT_TYPE:
+    case JS_LOCALE_TYPE:
+    case JS_NUMBER_FORMAT_TYPE:
+    case JS_PLURAL_RULES_TYPE:
+    case JS_RELATIVE_TIME_FORMAT_TYPE:
+    case JS_SEGMENT_ITERATOR_TYPE:
+    case JS_SEGMENTER_TYPE:
 #endif  // V8_INTL_SUPPORT
     case JS_CONTEXT_EXTENSION_OBJECT_TYPE:
     case JS_GENERATOR_OBJECT_TYPE:
@@ -224,8 +225,8 @@ Type::bitset BitsetType::Lub(const MapRefLike& map) {
     case JS_MODULE_NAMESPACE_TYPE:
     case JS_ARRAY_BUFFER_TYPE:
     case JS_ARRAY_ITERATOR_TYPE:
-    case JS_REGEXP_TYPE:  // TODO(rossberg): there should be a RegExp type.
-    case JS_REGEXP_STRING_ITERATOR_TYPE:
+    case JS_REG_EXP_TYPE:
+    case JS_REG_EXP_STRING_ITERATOR_TYPE:
     case JS_TYPED_ARRAY_TYPE:
     case JS_DATA_VIEW_TYPE:
     case JS_SET_TYPE:
@@ -243,12 +244,12 @@ Type::bitset BitsetType::Lub(const MapRefLike& map) {
     case JS_WEAK_REF_TYPE:
     case JS_WEAK_SET_TYPE:
     case JS_PROMISE_TYPE:
-    case WASM_EXCEPTION_TYPE:
-    case WASM_GLOBAL_TYPE:
-    case WASM_INSTANCE_TYPE:
-    case WASM_MEMORY_TYPE:
-    case WASM_MODULE_TYPE:
-    case WASM_TABLE_TYPE:
+    case WASM_EXCEPTION_OBJECT_TYPE:
+    case WASM_GLOBAL_OBJECT_TYPE:
+    case WASM_INSTANCE_OBJECT_TYPE:
+    case WASM_MEMORY_OBJECT_TYPE:
+    case WASM_MODULE_OBJECT_TYPE:
+    case WASM_TABLE_OBJECT_TYPE:
     case WEAK_CELL_TYPE:
       DCHECK(!map.is_callable());
       DCHECK(!map.is_undetectable());
@@ -293,6 +294,7 @@ Type::bitset BitsetType::Lub(const MapRefLike& map) {
     case DESCRIPTOR_ARRAY_TYPE:
     case TRANSITION_ARRAY_TYPE:
     case FEEDBACK_CELL_TYPE:
+    case CLOSURE_FEEDBACK_CELL_ARRAY_TYPE:
     case FEEDBACK_VECTOR_TYPE:
     case PROPERTY_ARRAY_TYPE:
     case FOREIGN_TYPE:
@@ -311,8 +313,9 @@ Type::bitset BitsetType::Lub(const MapRefLike& map) {
     case SCRIPT_TYPE:
     case CODE_TYPE:
     case PROPERTY_CELL_TYPE:
-    case MODULE_TYPE:
-    case MODULE_INFO_ENTRY_TYPE:
+    case SOURCE_TEXT_MODULE_TYPE:
+    case SOURCE_TEXT_MODULE_INFO_ENTRY_TYPE:
+    case SYNTHETIC_MODULE_TYPE:
     case CELL_TYPE:
     case PREPARSE_DATA_TYPE:
     case UNCOMPILED_DATA_WITHOUT_PREPARSE_DATA_TYPE:
@@ -321,13 +324,7 @@ Type::bitset BitsetType::Lub(const MapRefLike& map) {
 
     // Remaining instance types are unsupported for now. If any of them do
     // require bit set types, they should get kOtherInternal.
-    case MUTABLE_HEAP_NUMBER_TYPE:
     case FREE_SPACE_TYPE:
-#define FIXED_TYPED_ARRAY_CASE(Type, type, TYPE, ctype) \
-  case FIXED_##TYPE##_ARRAY_TYPE:
-
-      TYPED_ARRAYS(FIXED_TYPED_ARRAY_CASE)
-#undef FIXED_TYPED_ARRAY_CASE
     case FILLER_TYPE:
     case ACCESS_CHECK_INFO_TYPE:
     case ASM_WASM_DATA_TYPE:
@@ -347,11 +344,17 @@ Type::bitset BitsetType::Lub(const MapRefLike& map) {
     case SMALL_ORDERED_NAME_DICTIONARY_TYPE:
     case PROTOTYPE_INFO_TYPE:
     case INTERPRETER_DATA_TYPE:
+    case TEMPLATE_OBJECT_DESCRIPTION_TYPE:
     case TUPLE2_TYPE:
     case TUPLE3_TYPE:
+    case ENUM_CACHE_TYPE:
+    case SOURCE_POSITION_TABLE_WITH_FRAME_CACHE_TYPE:
+    case WASM_CAPI_FUNCTION_DATA_TYPE:
+    case WASM_INDIRECT_FUNCTION_TABLE_TYPE:
     case WASM_DEBUG_INFO_TYPE:
     case WASM_EXCEPTION_TAG_TYPE:
     case WASM_EXPORTED_FUNCTION_DATA_TYPE:
+    case WASM_JS_FUNCTION_DATA_TYPE:
     case LOAD_HANDLER_TYPE:
     case STORE_HANDLER_TYPE:
     case ASYNC_GENERATOR_REQUEST_TYPE:
@@ -361,7 +364,9 @@ Type::bitset BitsetType::Lub(const MapRefLike& map) {
     case PROMISE_FULFILL_REACTION_JOB_TASK_TYPE:
     case PROMISE_REJECT_REACTION_JOB_TASK_TYPE:
     case PROMISE_RESOLVE_THENABLE_JOB_TASK_TYPE:
-    case FINALIZATION_GROUP_CLEANUP_JOB_TASK_TYPE:
+#define MAKE_TORQUE_CLASS_TYPE(V) case V:
+      TORQUE_INTERNAL_INSTANCE_TYPES(MAKE_TORQUE_CLASS_TYPE)
+#undef MAKE_TORQUE_CLASS_TYPE
       UNREACHABLE();
   }
   UNREACHABLE();

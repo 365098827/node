@@ -1,4 +1,6 @@
+#include "env-inl.h"
 #include "node_internals.h"
+#include "util-inl.h"
 
 #ifdef NODE_IMPLEMENTS_POSIX_CREDENTIALS
 #include <grp.h>  // getgrnam()
@@ -305,14 +307,13 @@ static void SetGroups(const FunctionCallbackInfo<Value>& args) {
 
   Local<Array> groups_list = args[0].As<Array>();
   size_t size = groups_list->Length();
-  gid_t* groups = new gid_t[size];
+  MaybeStackBuffer<gid_t, 64> groups(size);
 
   for (size_t i = 0; i < size; i++) {
     gid_t gid = gid_by_name(
         env->isolate(), groups_list->Get(env->context(), i).ToLocalChecked());
 
     if (gid == gid_not_found) {
-      delete[] groups;
       // Tells JS to throw ERR_INVALID_CREDENTIAL
       args.GetReturnValue().Set(static_cast<uint32_t>(i + 1));
       return;
@@ -321,8 +322,7 @@ static void SetGroups(const FunctionCallbackInfo<Value>& args) {
     groups[i] = gid;
   }
 
-  int rc = setgroups(size, groups);
-  delete[] groups;
+  int rc = setgroups(size, *groups);
 
   if (rc == -1) return env->ThrowErrnoException(errno, "setgroups");
 

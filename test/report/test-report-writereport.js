@@ -38,6 +38,14 @@ function validate() {
 }
 
 {
+  // Test with an error with one line stack
+  const error = new Error();
+  error.stack = 'only one line';
+  process.report.writeReport(error);
+  validate();
+}
+
+{
   // Test with a file argument.
   const file = process.report.writeReport('custom-name-1.json');
   const absolutePath = path.join(tmpdir.path, file);
@@ -71,14 +79,14 @@ function validate() {
 
 // Test with an invalid file argument.
 [null, 1, Symbol(), function() {}].forEach((file) => {
-  common.expectsError(() => {
+  assert.throws(() => {
     process.report.writeReport(file);
   }, { code: 'ERR_INVALID_ARG_TYPE' });
 });
 
 // Test with an invalid error argument.
 [null, 1, Symbol(), function() {}, 'foo'].forEach((error) => {
-  common.expectsError(() => {
+  assert.throws(() => {
     process.report.writeReport('file', error);
   }, { code: 'ERR_INVALID_ARG_TYPE' });
 });

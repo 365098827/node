@@ -4,7 +4,7 @@
 
 #include "src/interpreter/bytecode-array-writer.h"
 
-#include "src/api-inl.h"
+#include "src/api/api-inl.h"
 #include "src/interpreter/bytecode-jump-table.h"
 #include "src/interpreter/bytecode-label.h"
 #include "src/interpreter/bytecode-node.h"
@@ -12,8 +12,7 @@
 #include "src/interpreter/bytecode-source-info.h"
 #include "src/interpreter/constant-array-builder.h"
 #include "src/interpreter/handler-table-builder.h"
-#include "src/log.h"
-#include "src/objects-inl.h"
+#include "src/objects/objects-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -50,18 +49,42 @@ Handle<BytecodeArray> BytecodeArrayWriter::ToBytecodeArray(
       bytecode_size, &bytecodes()->front(), frame_size, parameter_count,
       constant_pool);
   bytecode_array->set_handler_table(*handler_table);
-  // TODO(v8:8510): Need to support native functions that should always have
-  // source positions suppressed and should write empty_byte_array here.
-  if (!source_position_table_builder_.Omit()) {
-    Handle<ByteArray> source_position_table =
-        source_position_table_builder()->ToSourcePositionTable(isolate);
-    bytecode_array->set_source_position_table(*source_position_table);
-    LOG_CODE_EVENT(isolate, CodeLinePosInfoRecordEvent(
-                                bytecode_array->GetFirstBytecodeAddress(),
-                                *source_position_table));
-  }
   return bytecode_array;
 }
+
+Handle<ByteArray> BytecodeArrayWriter::ToSourcePositionTable(Isolate* isolate) {
+  DCHECK(!source_position_table_builder_.Lazy());
+  Handle<ByteArray> source_position_table =
+      source_position_table_builder_.Omit()
+          ? ReadOnlyRoots(isolate).empty_byte_array_handle()
+          : source_position_table_builder_.ToSourcePositionTable(isolate);
+  return source_position_table;
+}
+
+#ifdef DEBUG
+int BytecodeArrayWriter::CheckBytecodeMatches(Handle<BytecodeArray> bytecode) {
+  int mismatches = false;
+  int bytecode_size = static_cast<int>(bytecodes()->size());
+  const byte* bytecode_ptr = &bytecodes()->front();
+  if (bytecode_size != bytecode->length()) mismatches = true;
+
+  // If there's a mismatch only in the length of the bytecode (very unlikely)
+  // then the first mismatch will be the first extra bytecode.
+  int first_mismatch = std::min(bytecode_size, bytecode->length());
+  for (int i = 0; i < first_mismatch; ++i) {
+    if (bytecode_ptr[i] != bytecode->get(i)) {
+      mismatches = true;
+      first_mismatch = i;
+      break;
+    }
+  }
+
+  if (mismatches) {
+    return first_mismatch;
+  }
+  return -1;
+}
+#endif
 
 void BytecodeArrayWriter::Write(BytecodeNode* node) {
   DCHECK(!Bytecodes::IsJump(node->bytecode()));
@@ -286,6 +309,8 @@ Bytecode GetJumpWithConstantOperand(Bytecode jump_bytecode) {
       return Bytecode::kJumpIfUndefinedConstant;
     case Bytecode::kJumpIfNotUndefined:
       return Bytecode::kJumpIfNotUndefinedConstant;
+    case Bytecode::kJumpIfUndefinedOrNull:
+      return Bytecode::kJumpIfUndefinedOrNullConstant;
     case Bytecode::kJumpIfJSReceiver:
       return Bytecode::kJumpIfJSReceiverConstant;
     default:
@@ -334,8 +359,8 @@ void BytecodeArrayWriter::PatchJumpWith16BitOperand(size_t jump_location,
     // The jump fits within the range of an Imm16 operand, so cancel
     // the reservation and jump directly.
     constant_array_builder()->DiscardReservedEntry(OperandSize::kShort);
-    WriteUnalignedUInt16(reinterpret_cast<Address>(operand_bytes),
-                         static_cast<uint16_t>(delta));
+    base::WriteUnalignedValue<uint16_t>(
+        reinterpret_cast<Address>(operand_bytes), static_cast<uint16_t>(delta));
   } else {
     // The jump does not fit within the range of an Imm16 operand, so
     // commit reservation putting the offset into the constant pool,
@@ -344,8 +369,8 @@ void BytecodeArrayWriter::PatchJumpWith16BitOperand(size_t jump_location,
         OperandSize::kShort, Smi::FromInt(delta));
     jump_bytecode = GetJumpWithConstantOperand(jump_bytecode);
     bytecodes()->at(jump_location) = Bytecodes::ToByte(jump_bytecode);
-    WriteUnalignedUInt16(reinterpret_cast<Address>(operand_bytes),
-                         static_cast<uint16_t>(entry));
+    base::WriteUnalignedValue<uint16_t>(
+        reinterpret_cast<Address>(operand_bytes), static_cast<uint16_t>(entry));
   }
   DCHECK(bytecodes()->at(operand_location) == k8BitJumpPlaceholder &&
          bytecodes()->at(operand_location + 1) == k8BitJumpPlaceholder);
@@ -359,8 +384,8 @@ void BytecodeArrayWriter::PatchJumpWith32BitOperand(size_t jump_location,
       Bytecodes::FromByte(bytecodes()->at(jump_location))));
   constant_array_builder()->DiscardReservedEntry(OperandSize::kQuad);
   uint8_t operand_bytes[4];
-  WriteUnalignedUInt32(reinterpret_cast<Address>(operand_bytes),
-                       static_cast<uint32_t>(delta));
+  base::WriteUnalignedValue<uint32_t>(reinterpret_cast<Address>(operand_bytes),
+                                      static_cast<uint32_t>(delta));
   size_t operand_location = jump_location + 1;
   DCHECK(bytecodes()->at(operand_location) == k8BitJumpPlaceholder &&
          bytecodes()->at(operand_location + 1) == k8BitJumpPlaceholder &&
@@ -445,7 +470,6 @@ void BytecodeArrayWriter::EmitJump(BytecodeNode* node, BytecodeLabel* label) {
   switch (reserved_operand_size) {
     case OperandSize::kNone:
       UNREACHABLE();
-      break;
     case OperandSize::kByte:
       node->update_operand0(k8BitJumpPlaceholder);
       break;

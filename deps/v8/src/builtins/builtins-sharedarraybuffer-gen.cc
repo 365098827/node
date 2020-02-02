@@ -4,15 +4,13 @@
 
 #include "src/builtins/builtins-utils-gen.h"
 #include "src/builtins/builtins.h"
-#include "src/code-stub-assembler.h"
-#include "src/objects.h"
+#include "src/codegen/code-stub-assembler.h"
+#include "src/objects/objects.h"
 
 namespace v8 {
 namespace internal {
 
 using compiler::Node;
-template <typename T>
-using TNode = compiler::TNode<T>;
 
 class SharedArrayBufferBuiltinsAssembler : public CodeStubAssembler {
  public:
@@ -21,12 +19,12 @@ class SharedArrayBufferBuiltinsAssembler : public CodeStubAssembler {
       : CodeStubAssembler(state) {}
 
  protected:
-  typedef Node* (CodeAssembler::*AssemblerFunction)(MachineType type,
-                                                    Node* base, Node* offset,
-                                                    Node* value,
-                                                    Node* value_high);
+  using AssemblerFunction = Node* (CodeAssembler::*)(MachineType type,
+                                                     Node* base, Node* offset,
+                                                     Node* value,
+                                                     Node* value_high);
   void ValidateSharedTypedArray(Node* tagged, Node* context,
-                                Node** out_instance_type,
+                                TNode<Int32T>* out_elements_kind,
                                 Node** out_backing_store);
   Node* ConvertTaggedAtomicIndexToWord32(Node* tagged, Node* context,
                                          Node** number_index);
@@ -46,7 +44,7 @@ class SharedArrayBufferBuiltinsAssembler : public CodeStubAssembler {
 };
 
 void SharedArrayBufferBuiltinsAssembler::ValidateSharedTypedArray(
-    Node* tagged, Node* context, Node** out_instance_type,
+    Node* tagged, Node* context, TNode<Int32T>* out_elements_kind,
     Node** out_backing_store) {
   Label not_float_or_clamped(this), invalid(this);
 
@@ -54,8 +52,8 @@ void SharedArrayBufferBuiltinsAssembler::ValidateSharedTypedArray(
   GotoIf(TaggedIsSmi(tagged), &invalid);
 
   // Fail if the array's instance type is not JSTypedArray.
-  GotoIfNot(InstanceTypeEqual(LoadInstanceType(tagged), JS_TYPED_ARRAY_TYPE),
-            &invalid);
+  TNode<Map> tagged_map = LoadMap(tagged);
+  GotoIfNot(IsJSTypedArrayMap(tagged_map), &invalid);
 
   // Fail if the array's JSArrayBuffer is not shared.
   TNode<JSArrayBuffer> array_buffer = LoadJSArrayBufferViewBuffer(CAST(tagged));
@@ -63,20 +61,18 @@ void SharedArrayBufferBuiltinsAssembler::ValidateSharedTypedArray(
   GotoIfNot(IsSetWord32<JSArrayBuffer::IsSharedBit>(bitfield), &invalid);
 
   // Fail if the array's element type is float32, float64 or clamped.
-  Node* elements_instance_type = LoadInstanceType(LoadElements(tagged));
-  STATIC_ASSERT(FIXED_INT8_ARRAY_TYPE < FIXED_FLOAT32_ARRAY_TYPE);
-  STATIC_ASSERT(FIXED_INT16_ARRAY_TYPE < FIXED_FLOAT32_ARRAY_TYPE);
-  STATIC_ASSERT(FIXED_INT32_ARRAY_TYPE < FIXED_FLOAT32_ARRAY_TYPE);
-  STATIC_ASSERT(FIXED_UINT8_ARRAY_TYPE < FIXED_FLOAT32_ARRAY_TYPE);
-  STATIC_ASSERT(FIXED_UINT16_ARRAY_TYPE < FIXED_FLOAT32_ARRAY_TYPE);
-  STATIC_ASSERT(FIXED_UINT32_ARRAY_TYPE < FIXED_FLOAT32_ARRAY_TYPE);
-  GotoIf(Int32LessThan(elements_instance_type,
-                       Int32Constant(FIXED_FLOAT32_ARRAY_TYPE)),
+  STATIC_ASSERT(INT8_ELEMENTS < FLOAT32_ELEMENTS);
+  STATIC_ASSERT(INT16_ELEMENTS < FLOAT32_ELEMENTS);
+  STATIC_ASSERT(INT32_ELEMENTS < FLOAT32_ELEMENTS);
+  STATIC_ASSERT(UINT8_ELEMENTS < FLOAT32_ELEMENTS);
+  STATIC_ASSERT(UINT16_ELEMENTS < FLOAT32_ELEMENTS);
+  STATIC_ASSERT(UINT32_ELEMENTS < FLOAT32_ELEMENTS);
+  TNode<Int32T> elements_kind = LoadMapElementsKind(tagged_map);
+  GotoIf(Int32LessThan(elements_kind, Int32Constant(FLOAT32_ELEMENTS)),
          &not_float_or_clamped);
-  STATIC_ASSERT(FIXED_BIGINT64_ARRAY_TYPE > FIXED_UINT8_CLAMPED_ARRAY_TYPE);
-  STATIC_ASSERT(FIXED_BIGUINT64_ARRAY_TYPE > FIXED_UINT8_CLAMPED_ARRAY_TYPE);
-  Branch(Int32GreaterThan(elements_instance_type,
-                          Int32Constant(FIXED_UINT8_CLAMPED_ARRAY_TYPE)),
+  STATIC_ASSERT(BIGINT64_ELEMENTS > UINT8_CLAMPED_ELEMENTS);
+  STATIC_ASSERT(BIGUINT64_ELEMENTS > UINT8_CLAMPED_ELEMENTS);
+  Branch(Int32GreaterThan(elements_kind, Int32Constant(UINT8_CLAMPED_ELEMENTS)),
          &not_float_or_clamped, &invalid);
 
   BIND(&invalid);
@@ -86,7 +82,7 @@ void SharedArrayBufferBuiltinsAssembler::ValidateSharedTypedArray(
   }
 
   BIND(&not_float_or_clamped);
-  *out_instance_type = elements_instance_type;
+  *out_elements_kind = elements_kind;
 
   TNode<RawPtrT> backing_store = LoadJSArrayBufferBackingStore(array_buffer);
   TNode<UintPtrT> byte_offset = LoadJSArrayBufferViewByteOffset(CAST(tagged));
@@ -116,13 +112,14 @@ Node* SharedArrayBufferBuiltinsAssembler::ConvertTaggedAtomicIndexToWord32(
 }
 
 void SharedArrayBufferBuiltinsAssembler::ValidateAtomicIndex(Node* array,
-                                                             Node* index_word,
+                                                             Node* index,
                                                              Node* context) {
   // Check if the index is in bounds. If not, throw RangeError.
   Label check_passed(this);
-  Node* array_length_word32 =
-      TruncateTaggedToWord32(context, LoadJSTypedArrayLength(CAST(array)));
-  GotoIf(Uint32LessThan(index_word, array_length_word32), &check_passed);
+  TNode<UintPtrT> array_length = LoadJSTypedArrayLength(CAST(array));
+  // TODO(v8:4153): Use UintPtr for the {index} as well.
+  GotoIf(UintPtrLessThan(ChangeUint32ToWord(index), array_length),
+         &check_passed);
 
   ThrowRangeError(context, MessageTemplate::kInvalidAtomicAccessIndex);
 
@@ -136,10 +133,8 @@ void SharedArrayBufferBuiltinsAssembler::DebugSanityCheckAtomicIndex(
   // ToInteger above calls out to JavaScript. A SharedArrayBuffer can't be
   // detached and the TypedArray length can't change either, so skipping this
   // check in Release mode is safe.
-  CSA_ASSERT(this,
-             Uint32LessThan(index_word,
-                            TruncateTaggedToWord32(
-                                context, LoadJSTypedArrayLength(CAST(array)))));
+  CSA_ASSERT(this, UintPtrLessThan(ChangeUint32ToWord(index_word),
+                                   LoadJSTypedArrayLength(CAST(array))));
 }
 #endif
 
@@ -170,26 +165,24 @@ TF_BUILTIN(AtomicsLoad, SharedArrayBufferBuiltinsAssembler) {
   Node* index = Parameter(Descriptor::kIndex);
   Node* context = Parameter(Descriptor::kContext);
 
-  Node* instance_type;
+  TNode<Int32T> elements_kind;
   Node* backing_store;
-  ValidateSharedTypedArray(array, context, &instance_type, &backing_store);
+  ValidateSharedTypedArray(array, context, &elements_kind, &backing_store);
 
   Node* index_integer;
   Node* index_word32 =
       ConvertTaggedAtomicIndexToWord32(index, context, &index_integer);
   ValidateAtomicIndex(array, index_word32, context);
-  Node* index_word = ChangeUint32ToWord(index_word32);
+  TNode<UintPtrT> index_word = ChangeUint32ToWord(index_word32);
 
   Label i8(this), u8(this), i16(this), u16(this), i32(this), u32(this),
       i64(this), u64(this), other(this);
   int32_t case_values[] = {
-      FIXED_INT8_ARRAY_TYPE,     FIXED_UINT8_ARRAY_TYPE,
-      FIXED_INT16_ARRAY_TYPE,    FIXED_UINT16_ARRAY_TYPE,
-      FIXED_INT32_ARRAY_TYPE,    FIXED_UINT32_ARRAY_TYPE,
-      FIXED_BIGINT64_ARRAY_TYPE, FIXED_BIGUINT64_ARRAY_TYPE,
+      INT8_ELEMENTS,  UINT8_ELEMENTS,  INT16_ELEMENTS,    UINT16_ELEMENTS,
+      INT32_ELEMENTS, UINT32_ELEMENTS, BIGINT64_ELEMENTS, BIGUINT64_ELEMENTS,
   };
   Label* case_labels[] = {&i8, &u8, &i16, &u16, &i32, &u32, &i64, &u64};
-  Switch(instance_type, &other, case_values, case_labels,
+  Switch(elements_kind, &other, case_values, case_labels,
          arraysize(case_labels));
 
   BIND(&i8);
@@ -244,36 +237,34 @@ TF_BUILTIN(AtomicsStore, SharedArrayBufferBuiltinsAssembler) {
   Node* value = Parameter(Descriptor::kValue);
   Node* context = Parameter(Descriptor::kContext);
 
-  Node* instance_type;
+  TNode<Int32T> elements_kind;
   Node* backing_store;
-  ValidateSharedTypedArray(array, context, &instance_type, &backing_store);
+  ValidateSharedTypedArray(array, context, &elements_kind, &backing_store);
 
   Node* index_integer;
   Node* index_word32 =
       ConvertTaggedAtomicIndexToWord32(index, context, &index_integer);
   ValidateAtomicIndex(array, index_word32, context);
-  Node* index_word = ChangeUint32ToWord(index_word32);
+  TNode<UintPtrT> index_word = ChangeUint32ToWord(index_word32);
 
   Label u8(this), u16(this), u32(this), u64(this), other(this);
-  STATIC_ASSERT(FIXED_BIGINT64_ARRAY_TYPE > FIXED_UINT32_ARRAY_TYPE);
-  STATIC_ASSERT(FIXED_BIGUINT64_ARRAY_TYPE > FIXED_UINT32_ARRAY_TYPE);
-  GotoIf(
-      Int32GreaterThan(instance_type, Int32Constant(FIXED_UINT32_ARRAY_TYPE)),
-      &u64);
+  STATIC_ASSERT(BIGINT64_ELEMENTS > INT32_ELEMENTS);
+  STATIC_ASSERT(BIGUINT64_ELEMENTS > INT32_ELEMENTS);
+  GotoIf(Int32GreaterThan(elements_kind, Int32Constant(INT32_ELEMENTS)), &u64);
 
-  Node* value_integer = ToInteger_Inline(CAST(context), CAST(value));
-  Node* value_word32 = TruncateTaggedToWord32(context, value_integer);
+  TNode<Number> value_integer = ToInteger_Inline(CAST(context), CAST(value));
+  TNode<Word32T> value_word32 = TruncateTaggedToWord32(context, value_integer);
 
 #if DEBUG
   DebugSanityCheckAtomicIndex(array, index_word32, context);
 #endif
 
   int32_t case_values[] = {
-      FIXED_INT8_ARRAY_TYPE,   FIXED_UINT8_ARRAY_TYPE, FIXED_INT16_ARRAY_TYPE,
-      FIXED_UINT16_ARRAY_TYPE, FIXED_INT32_ARRAY_TYPE, FIXED_UINT32_ARRAY_TYPE,
+      INT8_ELEMENTS,   UINT8_ELEMENTS, INT16_ELEMENTS,
+      UINT16_ELEMENTS, INT32_ELEMENTS, UINT32_ELEMENTS,
   };
   Label* case_labels[] = {&u8, &u8, &u16, &u16, &u32, &u32};
-  Switch(instance_type, &other, case_values, case_labels,
+  Switch(elements_kind, &other, case_values, case_labels,
          arraysize(case_labels));
 
   BIND(&u8);
@@ -320,9 +311,9 @@ TF_BUILTIN(AtomicsExchange, SharedArrayBufferBuiltinsAssembler) {
   Node* value = Parameter(Descriptor::kValue);
   Node* context = Parameter(Descriptor::kContext);
 
-  Node* instance_type;
+  TNode<Int32T> elements_kind;
   Node* backing_store;
-  ValidateSharedTypedArray(array, context, &instance_type, &backing_store);
+  ValidateSharedTypedArray(array, context, &elements_kind, &backing_store);
 
   Node* index_integer;
   Node* index_word32 =
@@ -333,30 +324,28 @@ TF_BUILTIN(AtomicsExchange, SharedArrayBufferBuiltinsAssembler) {
   Return(CallRuntime(Runtime::kAtomicsExchange, context, array, index_integer,
                      value));
 #else
-  Node* index_word = ChangeUint32ToWord(index_word32);
+  TNode<UintPtrT> index_word = ChangeUint32ToWord(index_word32);
 
   Label i8(this), u8(this), i16(this), u16(this), i32(this), u32(this),
       i64(this), u64(this), big(this), other(this);
-  STATIC_ASSERT(FIXED_BIGINT64_ARRAY_TYPE > FIXED_UINT32_ARRAY_TYPE);
-  STATIC_ASSERT(FIXED_BIGUINT64_ARRAY_TYPE > FIXED_UINT32_ARRAY_TYPE);
-  GotoIf(
-      Int32GreaterThan(instance_type, Int32Constant(FIXED_UINT32_ARRAY_TYPE)),
-      &big);
+  STATIC_ASSERT(BIGINT64_ELEMENTS > INT32_ELEMENTS);
+  STATIC_ASSERT(BIGUINT64_ELEMENTS > INT32_ELEMENTS);
+  GotoIf(Int32GreaterThan(elements_kind, Int32Constant(INT32_ELEMENTS)), &big);
 
-  Node* value_integer = ToInteger_Inline(CAST(context), CAST(value));
+  TNode<Number> value_integer = ToInteger_Inline(CAST(context), CAST(value));
 #if DEBUG
   DebugSanityCheckAtomicIndex(array, index_word32, context);
 #endif
-  Node* value_word32 = TruncateTaggedToWord32(context, value_integer);
+  TNode<Word32T> value_word32 = TruncateTaggedToWord32(context, value_integer);
 
   int32_t case_values[] = {
-      FIXED_INT8_ARRAY_TYPE,   FIXED_UINT8_ARRAY_TYPE, FIXED_INT16_ARRAY_TYPE,
-      FIXED_UINT16_ARRAY_TYPE, FIXED_INT32_ARRAY_TYPE, FIXED_UINT32_ARRAY_TYPE,
+      INT8_ELEMENTS,   UINT8_ELEMENTS, INT16_ELEMENTS,
+      UINT16_ELEMENTS, INT32_ELEMENTS, UINT32_ELEMENTS,
   };
   Label* case_labels[] = {
       &i8, &u8, &i16, &u16, &i32, &u32,
   };
-  Switch(instance_type, &other, case_values, case_labels,
+  Switch(elements_kind, &other, case_values, case_labels,
          arraysize(case_labels));
 
   BIND(&i8);
@@ -394,10 +383,8 @@ TF_BUILTIN(AtomicsExchange, SharedArrayBufferBuiltinsAssembler) {
   TVARIABLE(UintPtrT, var_high);
   BigIntToRawBytes(value_bigint, &var_low, &var_high);
   Node* high = Is64() ? nullptr : static_cast<Node*>(var_high.value());
-  GotoIf(Word32Equal(instance_type, Int32Constant(FIXED_BIGINT64_ARRAY_TYPE)),
-         &i64);
-  GotoIf(Word32Equal(instance_type, Int32Constant(FIXED_BIGUINT64_ARRAY_TYPE)),
-         &u64);
+  GotoIf(Word32Equal(elements_kind, Int32Constant(BIGINT64_ELEMENTS)), &i64);
+  GotoIf(Word32Equal(elements_kind, Int32Constant(BIGUINT64_ELEMENTS)), &u64);
   Unreachable();
 
   BIND(&i64);
@@ -426,9 +413,9 @@ TF_BUILTIN(AtomicsCompareExchange, SharedArrayBufferBuiltinsAssembler) {
   Node* new_value = Parameter(Descriptor::kNewValue);
   Node* context = Parameter(Descriptor::kContext);
 
-  Node* instance_type;
+  TNode<Int32T> elements_kind;
   Node* backing_store;
-  ValidateSharedTypedArray(array, context, &instance_type, &backing_store);
+  ValidateSharedTypedArray(array, context, &elements_kind, &backing_store);
 
   Node* index_integer;
   Node* index_word32 =
@@ -440,32 +427,34 @@ TF_BUILTIN(AtomicsCompareExchange, SharedArrayBufferBuiltinsAssembler) {
   Return(CallRuntime(Runtime::kAtomicsCompareExchange, context, array,
                      index_integer, old_value, new_value));
 #else
-  Node* index_word = ChangeUint32ToWord(index_word32);
+  TNode<UintPtrT> index_word = ChangeUint32ToWord(index_word32);
 
   Label i8(this), u8(this), i16(this), u16(this), i32(this), u32(this),
       i64(this), u64(this), big(this), other(this);
-  STATIC_ASSERT(FIXED_BIGINT64_ARRAY_TYPE > FIXED_UINT32_ARRAY_TYPE);
-  STATIC_ASSERT(FIXED_BIGUINT64_ARRAY_TYPE > FIXED_UINT32_ARRAY_TYPE);
-  GotoIf(
-      Int32GreaterThan(instance_type, Int32Constant(FIXED_UINT32_ARRAY_TYPE)),
-      &big);
+  STATIC_ASSERT(BIGINT64_ELEMENTS > INT32_ELEMENTS);
+  STATIC_ASSERT(BIGUINT64_ELEMENTS > INT32_ELEMENTS);
+  GotoIf(Int32GreaterThan(elements_kind, Int32Constant(INT32_ELEMENTS)), &big);
 
-  Node* old_value_integer = ToInteger_Inline(CAST(context), CAST(old_value));
-  Node* new_value_integer = ToInteger_Inline(CAST(context), CAST(new_value));
+  TNode<Number> old_value_integer =
+      ToInteger_Inline(CAST(context), CAST(old_value));
+  TNode<Number> new_value_integer =
+      ToInteger_Inline(CAST(context), CAST(new_value));
 #if DEBUG
   DebugSanityCheckAtomicIndex(array, index_word32, context);
 #endif
-  Node* old_value_word32 = TruncateTaggedToWord32(context, old_value_integer);
-  Node* new_value_word32 = TruncateTaggedToWord32(context, new_value_integer);
+  TNode<Word32T> old_value_word32 =
+      TruncateTaggedToWord32(context, old_value_integer);
+  TNode<Word32T> new_value_word32 =
+      TruncateTaggedToWord32(context, new_value_integer);
 
   int32_t case_values[] = {
-      FIXED_INT8_ARRAY_TYPE,   FIXED_UINT8_ARRAY_TYPE, FIXED_INT16_ARRAY_TYPE,
-      FIXED_UINT16_ARRAY_TYPE, FIXED_INT32_ARRAY_TYPE, FIXED_UINT32_ARRAY_TYPE,
+      INT8_ELEMENTS,   UINT8_ELEMENTS, INT16_ELEMENTS,
+      UINT16_ELEMENTS, INT32_ELEMENTS, UINT32_ELEMENTS,
   };
   Label* case_labels[] = {
       &i8, &u8, &i16, &u16, &i32, &u32,
   };
-  Switch(instance_type, &other, case_values, case_labels,
+  Switch(elements_kind, &other, case_values, case_labels,
          arraysize(case_labels));
 
   BIND(&i8);
@@ -512,10 +501,8 @@ TF_BUILTIN(AtomicsCompareExchange, SharedArrayBufferBuiltinsAssembler) {
   BigIntToRawBytes(new_value_bigint, &var_new_low, &var_new_high);
   Node* old_high = Is64() ? nullptr : static_cast<Node*>(var_old_high.value());
   Node* new_high = Is64() ? nullptr : static_cast<Node*>(var_new_high.value());
-  GotoIf(Word32Equal(instance_type, Int32Constant(FIXED_BIGINT64_ARRAY_TYPE)),
-         &i64);
-  GotoIf(Word32Equal(instance_type, Int32Constant(FIXED_BIGUINT64_ARRAY_TYPE)),
-         &u64);
+  GotoIf(Word32Equal(elements_kind, Int32Constant(BIGINT64_ELEMENTS)), &i64);
+  GotoIf(Word32Equal(elements_kind, Int32Constant(BIGUINT64_ELEMENTS)), &u64);
   Unreachable();
 
   BIND(&i64);
@@ -558,9 +545,9 @@ BINOP_BUILTIN(Xor)
 void SharedArrayBufferBuiltinsAssembler::AtomicBinopBuiltinCommon(
     Node* array, Node* index, Node* value, Node* context,
     AssemblerFunction function, Runtime::FunctionId runtime_function) {
-  Node* instance_type;
+  TNode<Int32T> elements_kind;
   Node* backing_store;
-  ValidateSharedTypedArray(array, context, &instance_type, &backing_store);
+  ValidateSharedTypedArray(array, context, &elements_kind, &backing_store);
 
   Node* index_integer;
   Node* index_word32 =
@@ -571,31 +558,29 @@ void SharedArrayBufferBuiltinsAssembler::AtomicBinopBuiltinCommon(
     V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_S390 || V8_TARGET_ARCH_S390X
   Return(CallRuntime(runtime_function, context, array, index_integer, value));
 #else
-  Node* index_word = ChangeUint32ToWord(index_word32);
+  TNode<UintPtrT> index_word = ChangeUint32ToWord(index_word32);
 
   Label i8(this), u8(this), i16(this), u16(this), i32(this), u32(this),
       i64(this), u64(this), big(this), other(this);
 
-  STATIC_ASSERT(FIXED_BIGINT64_ARRAY_TYPE > FIXED_UINT32_ARRAY_TYPE);
-  STATIC_ASSERT(FIXED_BIGUINT64_ARRAY_TYPE > FIXED_UINT32_ARRAY_TYPE);
-  GotoIf(
-      Int32GreaterThan(instance_type, Int32Constant(FIXED_UINT32_ARRAY_TYPE)),
-      &big);
+  STATIC_ASSERT(BIGINT64_ELEMENTS > INT32_ELEMENTS);
+  STATIC_ASSERT(BIGUINT64_ELEMENTS > INT32_ELEMENTS);
+  GotoIf(Int32GreaterThan(elements_kind, Int32Constant(INT32_ELEMENTS)), &big);
 
-  Node* value_integer = ToInteger_Inline(CAST(context), CAST(value));
+  TNode<Number> value_integer = ToInteger_Inline(CAST(context), CAST(value));
 #if DEBUG
   DebugSanityCheckAtomicIndex(array, index_word32, context);
 #endif
-  Node* value_word32 = TruncateTaggedToWord32(context, value_integer);
+  TNode<Word32T> value_word32 = TruncateTaggedToWord32(context, value_integer);
 
   int32_t case_values[] = {
-      FIXED_INT8_ARRAY_TYPE,   FIXED_UINT8_ARRAY_TYPE, FIXED_INT16_ARRAY_TYPE,
-      FIXED_UINT16_ARRAY_TYPE, FIXED_INT32_ARRAY_TYPE, FIXED_UINT32_ARRAY_TYPE,
+      INT8_ELEMENTS,   UINT8_ELEMENTS, INT16_ELEMENTS,
+      UINT16_ELEMENTS, INT32_ELEMENTS, UINT32_ELEMENTS,
   };
   Label* case_labels[] = {
       &i8, &u8, &i16, &u16, &i32, &u32,
   };
-  Switch(instance_type, &other, case_values, case_labels,
+  Switch(elements_kind, &other, case_values, case_labels,
          arraysize(case_labels));
 
   BIND(&i8);
@@ -635,10 +620,8 @@ void SharedArrayBufferBuiltinsAssembler::AtomicBinopBuiltinCommon(
   TVARIABLE(UintPtrT, var_high);
   BigIntToRawBytes(value_bigint, &var_low, &var_high);
   Node* high = Is64() ? nullptr : static_cast<Node*>(var_high.value());
-  GotoIf(Word32Equal(instance_type, Int32Constant(FIXED_BIGINT64_ARRAY_TYPE)),
-         &i64);
-  GotoIf(Word32Equal(instance_type, Int32Constant(FIXED_BIGUINT64_ARRAY_TYPE)),
-         &u64);
+  GotoIf(Word32Equal(elements_kind, Int32Constant(BIGINT64_ELEMENTS)), &i64);
+  GotoIf(Word32Equal(elements_kind, Int32Constant(BIGUINT64_ELEMENTS)), &u64);
   Unreachable();
 
   BIND(&i64);

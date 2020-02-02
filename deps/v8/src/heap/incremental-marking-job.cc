@@ -5,13 +5,13 @@
 #include "src/heap/incremental-marking-job.h"
 
 #include "src/base/platform/time.h"
+#include "src/execution/isolate.h"
+#include "src/execution/vm-state-inl.h"
 #include "src/heap/embedder-tracing.h"
 #include "src/heap/heap-inl.h"
 #include "src/heap/heap.h"
 #include "src/heap/incremental-marking.h"
-#include "src/isolate.h"
-#include "src/v8.h"
-#include "src/vm-state-inl.h"
+#include "src/init/v8.h"
 
 namespace v8 {
 namespace internal {
@@ -54,24 +54,24 @@ void IncrementalMarkingJob::ScheduleTask(Heap* heap, TaskType task_type) {
         V8::GetCurrentPlatform()->GetForegroundTaskRunner(isolate);
     if (task_type == TaskType::kNormal) {
       if (taskrunner->NonNestableTasksEnabled()) {
-        taskrunner->PostNonNestableTask(base::make_unique<Task>(
+        taskrunner->PostNonNestableTask(std::make_unique<Task>(
             heap->isolate(), this,
             EmbedderHeapTracer::EmbedderStackState::kEmpty, task_type));
       } else {
-        taskrunner->PostTask(base::make_unique<Task>(
+        taskrunner->PostTask(std::make_unique<Task>(
             heap->isolate(), this,
             EmbedderHeapTracer::EmbedderStackState::kUnknown, task_type));
       }
     } else {
       if (taskrunner->NonNestableDelayedTasksEnabled()) {
         taskrunner->PostNonNestableDelayedTask(
-            base::make_unique<Task>(
+            std::make_unique<Task>(
                 heap->isolate(), this,
                 EmbedderHeapTracer::EmbedderStackState::kEmpty, task_type),
             kDelayInSeconds);
       } else {
         taskrunner->PostDelayedTask(
-            base::make_unique<Task>(
+            std::make_unique<Task>(
                 heap->isolate(), this,
                 EmbedderHeapTracer::EmbedderStackState::kUnknown, task_type),
             kDelayInSeconds);

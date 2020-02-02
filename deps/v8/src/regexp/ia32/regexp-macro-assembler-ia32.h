@@ -5,14 +5,15 @@
 #ifndef V8_REGEXP_IA32_REGEXP_MACRO_ASSEMBLER_IA32_H_
 #define V8_REGEXP_IA32_REGEXP_MACRO_ASSEMBLER_IA32_H_
 
-#include "src/ia32/assembler-ia32.h"
-#include "src/macro-assembler.h"
+#include "src/codegen/ia32/assembler-ia32.h"
+#include "src/codegen/macro-assembler.h"
 #include "src/regexp/regexp-macro-assembler.h"
 
 namespace v8 {
 namespace internal {
 
-class RegExpMacroAssemblerIA32: public NativeRegExpMacroAssembler {
+class V8_EXPORT_PRIVATE RegExpMacroAssemblerIA32
+    : public NativeRegExpMacroAssembler {
  public:
   RegExpMacroAssemblerIA32(Isolate* isolate, Zone* zone, Mode mode,
                            int registers_to_save);
@@ -22,7 +23,7 @@ class RegExpMacroAssemblerIA32: public NativeRegExpMacroAssembler {
   virtual void AdvanceRegister(int reg, int by);
   virtual void Backtrack();
   virtual void Bind(Label* label);
-  virtual void CheckAtStart(Label* on_at_start);
+  virtual void CheckAtStart(int cp_offset, Label* on_at_start);
   virtual void CheckCharacter(uint32_t c, Label* on_equal);
   virtual void CheckCharacterAfterAnd(uint32_t c,
                                       uint32_t mask,
@@ -65,10 +66,9 @@ class RegExpMacroAssemblerIA32: public NativeRegExpMacroAssembler {
   virtual void IfRegisterLT(int reg, int comparand, Label* if_lt);
   virtual void IfRegisterEqPos(int reg, Label* if_eq);
   virtual IrregexpImplementation Implementation();
-  virtual void LoadCurrentCharacter(int cp_offset,
-                                    Label* on_end_of_input,
-                                    bool check_bounds = true,
-                                    int characters = 1);
+  virtual void LoadCurrentCharacterImpl(int cp_offset, Label* on_end_of_input,
+                                        bool check_bounds, int characters,
+                                        int eats_at_least);
   virtual void PopCurrentPosition();
   virtual void PopRegister(int register_index);
   virtual void PushBacktrack(Label* label);

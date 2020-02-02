@@ -29,29 +29,31 @@ SMI_ACCESSORS(Script, id, kIdOffset)
 SMI_ACCESSORS(Script, line_offset, kLineOffsetOffset)
 SMI_ACCESSORS(Script, column_offset, kColumnOffsetOffset)
 ACCESSORS(Script, context_data, Object, kContextOffset)
-SMI_ACCESSORS(Script, type, kTypeOffset)
+SMI_ACCESSORS(Script, type, kScriptTypeOffset)
 ACCESSORS(Script, line_ends, Object, kLineEndsOffset)
 ACCESSORS_CHECKED(Script, eval_from_shared_or_wrapped_arguments, Object,
                   kEvalFromSharedOrWrappedArgumentsOffset,
                   this->type() != TYPE_WASM)
 SMI_ACCESSORS_CHECKED(Script, eval_from_position, kEvalFromPositionOffset,
                       this->type() != TYPE_WASM)
-ACCESSORS(Script, shared_function_infos, WeakFixedArray,
-          kSharedFunctionInfosOffset)
 SMI_ACCESSORS(Script, flags, kFlagsOffset)
 ACCESSORS(Script, source_url, Object, kSourceUrlOffset)
 ACCESSORS(Script, source_mapping_url, Object, kSourceMappingUrlOffset)
 ACCESSORS(Script, host_defined_options, FixedArray, kHostDefinedOptionsOffset)
-ACCESSORS_CHECKED(Script, wasm_module_object, Object,
+ACCESSORS_CHECKED(Script, wasm_breakpoint_infos, FixedArray,
                   kEvalFromSharedOrWrappedArgumentsOffset,
                   this->type() == TYPE_WASM)
+ACCESSORS_CHECKED(Script, wasm_managed_native_module, Object,
+                  kEvalFromPositionOffset, this->type() == TYPE_WASM)
+ACCESSORS_CHECKED(Script, wasm_weak_instance_list, WeakArrayList,
+                  kSharedFunctionInfosOffset, this->type() == TYPE_WASM)
 
 bool Script::is_wrapped() const {
-  return eval_from_shared_or_wrapped_arguments()->IsFixedArray();
+  return eval_from_shared_or_wrapped_arguments().IsFixedArray();
 }
 
 bool Script::has_eval_from_shared() const {
-  return eval_from_shared_or_wrapped_arguments()->IsSharedFunctionInfo();
+  return eval_from_shared_or_wrapped_arguments().IsSharedFunctionInfo();
 }
 
 void Script::set_eval_from_shared(SharedFunctionInfo shared,
@@ -73,6 +75,28 @@ void Script::set_wrapped_arguments(FixedArray value, WriteBarrierMode mode) {
 FixedArray Script::wrapped_arguments() const {
   DCHECK(is_wrapped());
   return FixedArray::cast(eval_from_shared_or_wrapped_arguments());
+}
+
+DEF_GETTER(Script, shared_function_infos, WeakFixedArray) {
+  return type() == TYPE_WASM
+             ? ReadOnlyRoots(GetHeap()).empty_weak_fixed_array()
+             : TaggedField<WeakFixedArray, kSharedFunctionInfosOffset>::load(
+                   *this);
+}
+
+void Script::set_shared_function_infos(WeakFixedArray value,
+                                       WriteBarrierMode mode) {
+  DCHECK_NE(TYPE_WASM, type());
+  TaggedField<WeakFixedArray, kSharedFunctionInfosOffset>::store(*this, value);
+  CONDITIONAL_WRITE_BARRIER(*this, kSharedFunctionInfosOffset, value, mode);
+}
+
+bool Script::has_wasm_breakpoint_infos() const {
+  return type() == TYPE_WASM && wasm_breakpoint_infos().length() > 0;
+}
+
+wasm::NativeModule* Script::wasm_native_module() const {
+  return Managed<wasm::NativeModule>::cast(wasm_managed_native_module()).raw();
 }
 
 Script::CompilationType Script::compilation_type() {
@@ -104,13 +128,13 @@ void Script::set_origin_options(ScriptOriginOptions origin_options) {
 
 bool Script::HasValidSource() {
   Object src = this->source();
-  if (!src->IsString()) return true;
+  if (!src.IsString()) return true;
   String src_str = String::cast(src);
   if (!StringShape(src_str).IsExternal()) return true;
-  if (src_str->IsOneByteRepresentation()) {
-    return ExternalOneByteString::cast(src)->resource() != nullptr;
-  } else if (src_str->IsTwoByteRepresentation()) {
-    return ExternalTwoByteString::cast(src)->resource() != nullptr;
+  if (src_str.IsOneByteRepresentation()) {
+    return ExternalOneByteString::cast(src).resource() != nullptr;
+  } else if (src_str.IsTwoByteRepresentation()) {
+    return ExternalTwoByteString::cast(src).resource() != nullptr;
   }
   return true;
 }

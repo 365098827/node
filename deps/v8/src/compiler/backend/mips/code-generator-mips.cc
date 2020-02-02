@@ -2,16 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/assembler-inl.h"
-#include "src/callable.h"
+#include "src/codegen/assembler-inl.h"
+#include "src/codegen/callable.h"
+#include "src/codegen/macro-assembler.h"
+#include "src/codegen/optimized-compilation-info.h"
 #include "src/compiler/backend/code-generator-impl.h"
 #include "src/compiler/backend/code-generator.h"
 #include "src/compiler/backend/gap-resolver.h"
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/osr.h"
 #include "src/heap/heap-inl.h"  // crbug.com/v8/8499
-#include "src/macro-assembler.h"
-#include "src/optimized-compilation-info.h"
 #include "src/wasm/wasm-code-manager.h"
 
 namespace v8 {
@@ -80,6 +80,7 @@ class MipsOperandConverter final : public InstructionOperandConverter {
         return Operand::EmbeddedNumber(constant.ToFloat64().value());
       case Constant::kInt64:
       case Constant::kExternalReference:
+      case Constant::kCompressedHeapObject:
       case Constant::kHeapObject:
         // TODO(plind): Maybe we should handle ExtRef & HeapObj here?
         //    maybe not done on arm due to const pool ??
@@ -171,7 +172,9 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
       __ Push(ra);
     }
 
-    if (stub_mode_ == StubCallMode::kCallWasmRuntimeStub) {
+    if (mode_ == RecordWriteMode::kValueIsEphemeronKey) {
+      __ CallEphemeronKeyBarrier(object_, scratch1_, save_fp_mode);
+    } else if (stub_mode_ == StubCallMode::kCallWasmRuntimeStub) {
       // A direct call to a wasm runtime stub defined in this module.
       // Just encode the stub index. This will be patched when the code
       // is added to the native module and copied into wasm code space.
@@ -262,33 +265,33 @@ Condition FlagsConditionToConditionTst(FlagsCondition condition) {
   UNREACHABLE();
 }
 
-FPUCondition FlagsConditionToConditionCmpFPU(bool& predicate,
+FPUCondition FlagsConditionToConditionCmpFPU(bool* predicate,
                                              FlagsCondition condition) {
   switch (condition) {
     case kEqual:
-      predicate = true;
+      *predicate = true;
       return EQ;
     case kNotEqual:
-      predicate = false;
+      *predicate = false;
       return EQ;
     case kUnsignedLessThan:
-      predicate = true;
+      *predicate = true;
       return OLT;
     case kUnsignedGreaterThanOrEqual:
-      predicate = false;
+      *predicate = false;
       return OLT;
     case kUnsignedLessThanOrEqual:
-      predicate = true;
+      *predicate = true;
       return OLE;
     case kUnsignedGreaterThan:
-      predicate = false;
+      *predicate = false;
       return OLE;
     case kUnorderedEqual:
     case kUnorderedNotEqual:
-      predicate = true;
+      *predicate = true;
       break;
     default:
-      predicate = true;
+      *predicate = true;
       break;
   }
   UNREACHABLE();
@@ -301,7 +304,7 @@ FPUCondition FlagsConditionToConditionCmpFPU(bool& predicate,
 
 void EmitWordLoadPoisoningIfNeeded(CodeGenerator* codegen,
                                    InstructionCode opcode, Instruction* instr,
-                                   MipsOperandConverter& i) {
+                                   MipsOperandConverter const& i) {
   const MemoryAccessMode access_mode =
       static_cast<MemoryAccessMode>(MiscField::decode(opcode));
   if (access_mode == kMemoryAccessPoisoned) {
@@ -482,6 +485,8 @@ void EmitWordLoadPoisoningIfNeeded(CodeGenerator* codegen,
     __ Ll(i.TempRegister(2), MemOperand(i.TempRegister(0), 0));                \
     __ ExtractBits(i.OutputRegister(0), i.TempRegister(2), i.TempRegister(1),  \
                    size, sign_extend);                                         \
+    __ ExtractBits(i.InputRegister(2), i.InputRegister(2), i.TempRegister(1),  \
+                   size, sign_extend);                                         \
     __ BranchShort(&exit, ne, i.InputRegister(2),                              \
                    Operand(i.OutputRegister(0)));                              \
     __ InsertBits(i.TempRegister(2), i.InputRegister(3), i.TempRegister(1),    \
@@ -658,8 +663,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kArchCallBuiltinPointer: {
       DCHECK(!instr->InputAt(0)->IsImmediate());
-      Register builtin_pointer = i.InputRegister(0);
-      __ CallBuiltinPointer(builtin_pointer);
+      Register builtin_index = i.InputRegister(0);
+      __ CallBuiltinByIndex(builtin_index);
       RecordCallPosition(instr);
       frame_access_state()->ClearSPDelta();
       break;
@@ -774,6 +779,26 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     case kArchCallCFunction: {
       int const num_parameters = MiscField::decode(instr->opcode());
+      Label start_call;
+      bool isWasmCapiFunction =
+          linkage()->GetIncomingDescriptor()->IsWasmCapiFunction();
+      // from start_call to return address.
+      int offset = 40;
+#if V8_HOST_ARCH_MIPS
+      if (__ emit_debug_code()) {
+        offset += 16;
+      }
+#endif
+      if (isWasmCapiFunction) {
+        // Put the return address in a stack slot.
+        __ mov(kScratchReg, ra);
+        __ bind(&start_call);
+        __ nal();
+        __ nop();
+        __ Addu(ra, ra, offset - 8);  // 8 = nop + nal
+        __ sw(ra, MemOperand(fp, WasmExitFrameConstants::kCallingPCOffset));
+        __ mov(ra, kScratchReg);
+      }
       if (instr->InputAt(0)->IsImmediate()) {
         ExternalReference ref = i.InputExternalReference(0);
         __ CallCFunction(ref, num_parameters);
@@ -781,6 +806,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         Register func = i.InputRegister(0);
         __ CallCFunction(func, num_parameters);
       }
+      if (isWasmCapiFunction) {
+        CHECK_EQ(offset, __ SizeOfCodeGeneratedSince(&start_call));
+      }
+
+      RecordSafepoint(instr->reference_map(), Safepoint::kNoLazyDeopt);
       frame_access_state()->SetFrameAccessToDefault();
       // Ideally, we should decrement SP delta to match the change of stack
       // pointer in CallCFunction. However, for certain architectures (e.g.
@@ -812,22 +842,20 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kArchTableSwitch:
       AssembleArchTableSwitch(instr);
       break;
-    case kArchDebugAbort:
+    case kArchAbortCSAAssert:
       DCHECK(i.InputRegister(0) == a0);
-      if (!frame_access_state()->has_frame()) {
+      {
         // We don't actually want to generate a pile of code for this, so just
         // claim there is a stack frame, without generating one.
         FrameScope scope(tasm(), StackFrame::NONE);
-        __ Call(isolate()->builtins()->builtin_handle(Builtins::kAbortJS),
-                RelocInfo::CODE_TARGET);
-      } else {
-        __ Call(isolate()->builtins()->builtin_handle(Builtins::kAbortJS),
-                RelocInfo::CODE_TARGET);
+        __ Call(
+            isolate()->builtins()->builtin_handle(Builtins::kAbortCSAAssert),
+            RelocInfo::CODE_TARGET);
       }
-      __ stop("kArchDebugAbort");
+      __ stop();
       break;
     case kArchDebugBreak:
-      __ stop("kArchDebugBreak");
+      __ stop();
       break;
     case kArchComment:
       __ RecordComment(reinterpret_cast<const char*>(i.InputInt32(0)));
@@ -837,18 +865,17 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       // don't emit code for nops.
       break;
     case kArchDeoptimize: {
-      int deopt_state_id =
+      DeoptimizationExit* exit =
           BuildTranslation(instr, -1, 0, OutputFrameStateCombine::Ignore());
-      CodeGenResult result =
-          AssembleDeoptimizerCall(deopt_state_id, current_source_position_);
+      CodeGenResult result = AssembleDeoptimizerCall(exit);
       if (result != kSuccess) return result;
       break;
     }
     case kArchRet:
       AssembleReturn(instr->InputAt(0));
       break;
-    case kArchStackPointer:
-      __ mov(i.OutputRegister(), sp);
+    case kArchStackPointerGreaterThan:
+      // Pseudo-instruction used for cmp/branch. No opcode emitted here.
       break;
     case kArchFramePointer:
       __ mov(i.OutputRegister(), fp);
@@ -1167,7 +1194,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       FPURegister right = i.InputOrZeroSingleRegister(1);
       bool predicate;
       FPUCondition cc =
-          FlagsConditionToConditionCmpFPU(predicate, instr->flags_condition());
+          FlagsConditionToConditionCmpFPU(&predicate, instr->flags_condition());
 
       if ((left == kDoubleRegZero || right == kDoubleRegZero) &&
           !__ IsDoubleZeroRegSet()) {
@@ -1227,7 +1254,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       FPURegister right = i.InputOrZeroDoubleRegister(1);
       bool predicate;
       FPUCondition cc =
-          FlagsConditionToConditionCmpFPU(predicate, instr->flags_condition());
+          FlagsConditionToConditionCmpFPU(&predicate, instr->flags_condition());
       if ((left == kDoubleRegZero || right == kDoubleRegZero) &&
           !__ IsDoubleZeroRegSet()) {
         __ Move(kDoubleRegZero, 0.0);
@@ -1605,6 +1632,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ Move(kDoubleRegZero, 0.0);
       }
       __ Usdc1(ft, i.MemoryOperand(), kScratchReg);
+      break;
+    }
+    case kMipsSync: {
+      __ sync();
       break;
     }
     case kMipsPush:
@@ -2022,6 +2053,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ bnegi_w(i.OutputSimd128Register(), i.InputSimd128Register(0), 31);
       break;
     }
+    case kMipsF32x4Sqrt: {
+      CpuFeatureScope msa_scope(tasm(), MIPS_SIMD);
+      __ fsqrt_w(i.OutputSimd128Register(), i.InputSimd128Register(0));
+      break;
+    }
     case kMipsF32x4RecipApprox: {
       CpuFeatureScope msa_scope(tasm(), MIPS_SIMD);
       __ frcp_w(i.OutputSimd128Register(), i.InputSimd128Register(0));
@@ -2047,6 +2083,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kMipsF32x4Mul: {
       CpuFeatureScope msa_scope(tasm(), MIPS_SIMD);
       __ fmul_w(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                i.InputSimd128Register(1));
+      break;
+    }
+    case kMipsF32x4Div: {
+      CpuFeatureScope msa_scope(tasm(), MIPS_SIMD);
+      __ fdiv_w(i.OutputSimd128Register(), i.InputSimd128Register(0),
                 i.InputSimd128Register(1));
       break;
     }
@@ -2998,10 +3040,13 @@ void AssembleBranchToLabels(CodeGenerator* gen, TurboAssembler* tasm,
   } else if (instr->arch_opcode() == kMipsCmp) {
     cc = FlagsConditionToConditionCmp(condition);
     __ Branch(tlabel, cc, i.InputRegister(0), i.InputOperand(1));
+  } else if (instr->arch_opcode() == kArchStackPointerGreaterThan) {
+    cc = FlagsConditionToConditionCmp(condition);
+    __ Branch(tlabel, cc, sp, Operand(i.InputRegister(0)));
   } else if (instr->arch_opcode() == kMipsCmpS ||
              instr->arch_opcode() == kMipsCmpD) {
     bool predicate;
-    FlagsConditionToConditionCmpFPU(predicate, condition);
+    FlagsConditionToConditionCmpFPU(&predicate, condition);
     if (predicate) {
       __ BranchTrueF(tlabel);
     } else {
@@ -3091,7 +3136,7 @@ void CodeGenerator::AssembleBranchPoisoning(FlagsCondition condition,
     case kMipsCmpS:
     case kMipsCmpD: {
       bool predicate;
-      FlagsConditionToConditionCmpFPU(predicate, condition);
+      FlagsConditionToConditionCmpFPU(&predicate, condition);
       if (predicate) {
         __ LoadZeroIfFPUCondition(kSpeculationPoisonRegister);
       } else {
@@ -3101,7 +3146,6 @@ void CodeGenerator::AssembleBranchPoisoning(FlagsCondition condition,
       return;
     default:
       UNREACHABLE();
-      break;
   }
 }
 
@@ -3152,10 +3196,9 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
         __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
         ReferenceMap* reference_map =
             new (gen_->zone()) ReferenceMap(gen_->zone());
-        gen_->RecordSafepoint(reference_map, Safepoint::kSimple,
-                              Safepoint::kNoLazyDeopt);
+        gen_->RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
         if (FLAG_debug_code) {
-          __ stop(GetAbortReason(AbortReason::kUnexpectedReturnFromWasmTrap));
+          __ stop();
         }
       }
     }
@@ -3291,7 +3334,7 @@ void CodeGenerator::AssembleArchBoolean(Instruction* instr,
       __ Move(kDoubleRegZero, 0.0);
     }
     bool predicate;
-    FlagsConditionToConditionCmpFPU(predicate, condition);
+    FlagsConditionToConditionCmpFPU(&predicate, condition);
     if (!IsMipsArchVariant(kMips32r6)) {
       __ li(result, Operand(1));
       if (predicate) {
@@ -3374,8 +3417,14 @@ void CodeGenerator::AssembleConstructFrame() {
   auto call_descriptor = linkage()->GetIncomingDescriptor();
   if (frame_access_state()->has_frame()) {
     if (call_descriptor->IsCFunctionCall()) {
-      __ Push(ra, fp);
-      __ mov(fp, sp);
+      if (info()->GetOutputStackFrameType() == StackFrame::C_WASM_ENTRY) {
+        __ StubPrologue(StackFrame::C_WASM_ENTRY);
+        // Reserve stack space for saving the c_entry_fp later.
+        __ Subu(sp, sp, Operand(kSystemPointerSize));
+      } else {
+        __ Push(ra, fp);
+        __ mov(fp, sp);
+      }
     } else if (call_descriptor->IsJSFunctionCall()) {
       __ Prologue();
       if (call_descriptor->PushArgumentCount()) {
@@ -3385,7 +3434,8 @@ void CodeGenerator::AssembleConstructFrame() {
       __ StubPrologue(info()->GetOutputStackFrameType());
       if (call_descriptor->IsWasmFunctionCall()) {
         __ Push(kWasmInstanceRegister);
-      } else if (call_descriptor->IsWasmImportWrapper()) {
+      } else if (call_descriptor->IsWasmImportWrapper() ||
+                 call_descriptor->IsWasmCapiFunction()) {
         // WASM import wrappers are passed a tuple in the place of the instance.
         // Unpack the tuple into the instance and the target callable.
         // This must be done here in the codegen because it cannot be expressed
@@ -3395,12 +3445,16 @@ void CodeGenerator::AssembleConstructFrame() {
         __ lw(kWasmInstanceRegister,
               FieldMemOperand(kWasmInstanceRegister, Tuple2::kValue1Offset));
         __ Push(kWasmInstanceRegister);
+        if (call_descriptor->IsWasmCapiFunction()) {
+          // Reserve space for saving the PC later.
+          __ Subu(sp, sp, Operand(kSystemPointerSize));
+        }
       }
     }
   }
 
-  int required_slots = frame()->GetTotalFrameSlotCount() -
-                       call_descriptor->CalculateFixedFrameSize();
+  int required_slots =
+      frame()->GetTotalFrameSlotCount() - frame()->GetFixedSlotCount();
 
   if (info()->is_osr()) {
     // TurboFan OSR-compiled functions cannot be entered directly.
@@ -3418,6 +3472,42 @@ void CodeGenerator::AssembleConstructFrame() {
 
   const RegList saves = call_descriptor->CalleeSavedRegisters();
   const RegList saves_fpu = call_descriptor->CalleeSavedFPRegisters();
+
+  if (required_slots > 0) {
+    DCHECK(frame_access_state()->has_frame());
+    if (info()->IsWasm() && required_slots > 128) {
+      // For WebAssembly functions with big frames we have to do the stack
+      // overflow check before we construct the frame. Otherwise we may not
+      // have enough space on the stack to call the runtime for the stack
+      // overflow.
+      Label done;
+
+      // If the frame is bigger than the stack, we throw the stack overflow
+      // exception unconditionally. Thereby we can avoid the integer overflow
+      // check in the condition code.
+      if ((required_slots * kSystemPointerSize) < (FLAG_stack_size * 1024)) {
+        __ Lw(
+             kScratchReg,
+             FieldMemOperand(kWasmInstanceRegister,
+                             WasmInstanceObject::kRealStackLimitAddressOffset));
+        __ Lw(kScratchReg, MemOperand(kScratchReg));
+        __ Addu(kScratchReg, kScratchReg,
+                      Operand(required_slots * kSystemPointerSize));
+        __ Branch(&done, uge, sp, Operand(kScratchReg));
+      }
+
+      __ Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
+      // We come from WebAssembly, there are no references for the GC.
+      ReferenceMap* reference_map = new (zone()) ReferenceMap(zone());
+      RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
+      if (FLAG_debug_code) {
+        __ stop();
+      }
+
+      __ bind(&done);
+    }
+  }
+
   const int returns = frame()->GetReturnSlotCount();
 
   // Skip callee-saved and return slots, which are pushed below.
@@ -3501,6 +3591,8 @@ void CodeGenerator::AssembleReturn(InstructionOperand* pop) {
 
 void CodeGenerator::FinishCode() {}
 
+void CodeGenerator::PrepareForDeoptimizationExits(int deopt_count) {}
+
 void CodeGenerator::AssembleMove(InstructionOperand* source,
                                  InstructionOperand* destination) {
   MipsOperandConverter g(this, nullptr);
@@ -3562,6 +3654,8 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
           }
           break;
         }
+        case Constant::kCompressedHeapObject:
+          UNREACHABLE();
         case Constant::kRpoNumber:
           UNREACHABLE();  // TODO(titzer): loading RPO numbers on mips.
           break;

@@ -5,10 +5,10 @@
 #ifndef V8_COMPILER_GRAPH_ASSEMBLER_H_
 #define V8_COMPILER_GRAPH_ASSEMBLER_H_
 
+#include "src/compiler/feedback-source.h"
 #include "src/compiler/js-graph.h"
 #include "src/compiler/node.h"
 #include "src/compiler/simplified-operator.h"
-#include "src/vector-slot-pair.h"
 
 namespace v8 {
 namespace internal {
@@ -18,30 +18,35 @@ class Graph;
 
 namespace compiler {
 
-#define PURE_ASSEMBLER_MACH_UNOP_LIST(V) \
-  V(ChangeInt32ToInt64)                  \
-  V(ChangeInt32ToFloat64)                \
-  V(ChangeInt64ToFloat64)                \
-  V(ChangeUint32ToFloat64)               \
-  V(ChangeUint32ToUint64)                \
-  V(ChangeFloat64ToInt32)                \
-  V(ChangeFloat64ToInt64)                \
-  V(ChangeFloat64ToUint32)               \
-  V(TruncateInt64ToInt32)                \
-  V(RoundFloat64ToInt32)                 \
-  V(TruncateFloat64ToInt64)              \
-  V(TruncateFloat64ToWord32)             \
-  V(Float64ExtractLowWord32)             \
-  V(Float64ExtractHighWord32)            \
-  V(BitcastInt32ToFloat32)               \
-  V(BitcastInt64ToFloat64)               \
-  V(BitcastFloat32ToInt32)               \
-  V(BitcastFloat64ToInt64)               \
-  V(Float64Abs)                          \
-  V(Word32ReverseBytes)                  \
-  V(Word64ReverseBytes)                  \
-  V(Float64SilenceNaN)
-
+#define PURE_ASSEMBLER_MACH_UNOP_LIST(V)    \
+  V(ChangeInt32ToInt64)                     \
+  V(ChangeInt32ToFloat64)                   \
+  V(ChangeInt64ToFloat64)                   \
+  V(ChangeUint32ToFloat64)                  \
+  V(ChangeUint32ToUint64)                   \
+  V(ChangeFloat64ToInt32)                   \
+  V(ChangeFloat64ToInt64)                   \
+  V(ChangeFloat64ToUint32)                  \
+  V(TruncateInt64ToInt32)                   \
+  V(RoundFloat64ToInt32)                    \
+  V(TruncateFloat64ToInt64)                 \
+  V(TruncateFloat64ToWord32)                \
+  V(Float64ExtractLowWord32)                \
+  V(Float64ExtractHighWord32)               \
+  V(BitcastInt32ToFloat32)                  \
+  V(BitcastInt64ToFloat64)                  \
+  V(BitcastFloat32ToInt32)                  \
+  V(BitcastFloat64ToInt64)                  \
+  V(Float64Abs)                             \
+  V(Word32ReverseBytes)                     \
+  V(Word64ReverseBytes)                     \
+  V(Float64SilenceNaN)                      \
+  V(ChangeCompressedToTagged)               \
+  V(ChangeTaggedToCompressed)               \
+  V(ChangeTaggedSignedToCompressedSigned)   \
+  V(ChangeCompressedSignedToTaggedSigned)   \
+  V(ChangeTaggedPointerToCompressedPointer) \
+  V(ChangeCompressedPointerToTaggedPointer)
 #define PURE_ASSEMBLER_MACH_BINOP_LIST(V) \
   V(WordShl)                              \
   V(WordSar)                              \
@@ -52,6 +57,7 @@ namespace compiler {
   V(Word32Shr)                            \
   V(Word32Shl)                            \
   V(Word32Sar)                            \
+  V(Word64And)                            \
   V(IntAdd)                               \
   V(IntSub)                               \
   V(IntMul)                               \
@@ -66,6 +72,7 @@ namespace compiler {
   V(Uint64LessThan)                       \
   V(Uint64LessThanOrEqual)                \
   V(Int32LessThan)                        \
+  V(Int64Sub)                             \
   V(Float64Add)                           \
   V(Float64Sub)                           \
   V(Float64Div)                           \
@@ -88,21 +95,24 @@ namespace compiler {
   V(Uint32Mod)                               \
   V(Uint32Div)
 
-#define JSGRAPH_SINGLETON_CONSTANT_LIST(V) \
-  V(TrueConstant)                          \
-  V(FalseConstant)                         \
-  V(NullConstant)                          \
-  V(BooleanMapConstant)                    \
-  V(HeapNumberMapConstant)                 \
-  V(NoContextConstant)                     \
-  V(EmptyStringConstant)                   \
-  V(UndefinedConstant)                     \
-  V(TheHoleConstant)                       \
-  V(FixedArrayMapConstant)                 \
-  V(FixedDoubleArrayMapConstant)           \
-  V(ToNumberBuiltinConstant)               \
-  V(AllocateInNewSpaceStubConstant)        \
-  V(AllocateInOldSpaceStubConstant)
+#define JSGRAPH_SINGLETON_CONSTANT_LIST(V)        \
+  V(TrueConstant)                                 \
+  V(FalseConstant)                                \
+  V(NullConstant)                                 \
+  V(BigIntMapConstant)                            \
+  V(BooleanMapConstant)                           \
+  V(HeapNumberMapConstant)                        \
+  V(NoContextConstant)                            \
+  V(EmptyStringConstant)                          \
+  V(UndefinedConstant)                            \
+  V(TheHoleConstant)                              \
+  V(FixedArrayMapConstant)                        \
+  V(FixedDoubleArrayMapConstant)                  \
+  V(ToNumberBuiltinConstant)                      \
+  V(AllocateInYoungGenerationStubConstant)        \
+  V(AllocateRegularInYoungGenerationStubConstant) \
+  V(AllocateInOldGenerationStubConstant)          \
+  V(AllocateRegularInOldGenerationStubConstant)
 
 class GraphAssembler;
 
@@ -190,6 +200,7 @@ class GraphAssembler {
   Node* Float64Constant(double value);
   Node* Projection(int index, Node* value);
   Node* HeapConstant(Handle<HeapObject> object);
+  Node* NumberConstant(double value);
   Node* CEntryStubConstant(int result_size);
   Node* ExternalConstant(ExternalReference ref);
 
@@ -213,13 +224,17 @@ class GraphAssembler {
 
   Node* Unreachable();
 
+  Node* IntPtrEqual(Node* left, Node* right);
+  Node* TaggedEqual(Node* left, Node* right);
+
   Node* Float64RoundDown(Node* value);
   Node* Float64RoundTruncate(Node* value);
 
   Node* ToNumber(Node* value);
   Node* BitcastWordToTagged(Node* value);
   Node* BitcastTaggedToWord(Node* value);
-  Node* Allocate(PretenureFlag pretenure, Node* size);
+  Node* BitcastTaggedToWordForTagAndSmiBits(Node* value);
+  Node* Allocate(AllocationType allocation, Node* size);
   Node* LoadField(FieldAccess const&, Node* object);
   Node* LoadElement(ElementAccess const&, Node* object, Node* index);
   Node* StoreField(FieldAccess const&, Node* object, Node* value);
@@ -227,11 +242,11 @@ class GraphAssembler {
                      Node* value);
 
   Node* Store(StoreRepresentation rep, Node* object, Node* offset, Node* value);
-  Node* Load(MachineType rep, Node* object, Node* offset);
+  Node* Load(MachineType type, Node* object, Node* offset);
 
   Node* StoreUnaligned(MachineRepresentation rep, Node* object, Node* offset,
                        Node* value);
-  Node* LoadUnaligned(MachineType rep, Node* object, Node* offset);
+  Node* LoadUnaligned(MachineType type, Node* object, Node* offset);
 
   Node* Retain(Node* buffer);
   Node* UnsafePointerAdd(Node* base, Node* external);
@@ -239,11 +254,11 @@ class GraphAssembler {
   Node* Word32PoisonOnSpeculation(Node* value);
 
   Node* DeoptimizeIf(
-      DeoptimizeReason reason, VectorSlotPair const& feedback, Node* condition,
+      DeoptimizeReason reason, FeedbackSource const& feedback, Node* condition,
       Node* frame_state,
       IsSafetyCheck is_safety_check = IsSafetyCheck::kSafetyCheck);
   Node* DeoptimizeIfNot(
-      DeoptimizeReason reason, VectorSlotPair const& feedback, Node* condition,
+      DeoptimizeReason reason, FeedbackSource const& feedback, Node* condition,
       Node* frame_state,
       IsSafetyCheck is_safety_check = IsSafetyCheck::kSafetyCheck);
   template <typename... Args>
@@ -278,6 +293,12 @@ class GraphAssembler {
   Node* ExtractCurrentEffect();
 
  private:
+  // Adds a decompression node if pointer compression is enabled and the
+  // representation loaded is a compressed one. To be used after loads.
+  Node* InsertDecompressionIfNeeded(MachineRepresentation rep, Node* value);
+  // Adds a compression node if pointer compression is enabled and the
+  // representation to be stored is a compressed one. To be used before stores.
+  Node* InsertCompressionIfNeeded(MachineRepresentation rep, Node* value);
   template <typename... Vars>
   void MergeState(GraphAssemblerLabel<sizeof...(Vars)>* label, Vars... vars);
 

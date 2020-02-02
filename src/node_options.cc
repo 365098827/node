@@ -4,6 +4,8 @@
 #include "env-inl.h"
 #include "node_binding.h"
 
+#include <errno.h>
+#include <sstream>
 #include <cstdlib>  // strtoul, errno
 
 using v8::Boolean;
@@ -27,22 +29,32 @@ std::shared_ptr<PerProcessOptions> cli_options{new PerProcessOptions()};
 }  // namespace per_process
 
 void DebugOptions::CheckOptions(std::vector<std::string>* errors) {
-#if !NODE_USE_V8_PLATFORM
+#if !NODE_USE_V8_PLATFORM && !HAVE_INSPECTOR
   if (inspector_enabled) {
     errors->push_back("Inspector is not available when Node is compiled "
-                      "--without-v8-platform");
+                      "--without-v8-platform and --without-inspector.");
   }
 #endif
 
-  if (deprecated_debug && !inspector_enabled) {
+  if (deprecated_debug) {
     errors->push_back("[DEP0062]: `node --debug` and `node --debug-brk` "
-                      "are invalid. Please use `node --inspect` or "
+                      "are invalid. Please use `node --inspect` and "
                       "`node --inspect-brk` instead.");
   }
 
-  if (deprecated_debug && inspector_enabled && break_first_line) {
-    errors->push_back("[DEP0062]: `node --inspect --debug-brk` is deprecated. "
-                      "Please use `node --inspect-brk` instead.");
+  std::vector<std::string> destinations =
+      SplitString(inspect_publish_uid_string, ',');
+  inspect_publish_uid.console = false;
+  inspect_publish_uid.http = false;
+  for (const std::string& destination : destinations) {
+    if (destination == "stderr") {
+      inspect_publish_uid.console = true;
+    } else if (destination == "http") {
+      inspect_publish_uid.http = true;
+    } else {
+      errors->push_back("--inspect-publish-uid destination can be "
+                        "stderr or http");
+    }
   }
 }
 
@@ -53,6 +65,11 @@ void PerProcessOptions::CheckOptions(std::vector<std::string>* errors) {
                       "used, not both");
   }
 #endif
+  if (use_largepages != "off" &&
+      use_largepages != "on" &&
+      use_largepages != "silent") {
+    errors->push_back("invalid value for --use-largepages");
+  }
   per_isolate->CheckOptions(errors);
 }
 
@@ -103,33 +120,38 @@ void PerIsolateOptions::CheckOptions(std::vector<std::string>* errors) {
 }
 
 void EnvironmentOptions::CheckOptions(std::vector<std::string>* errors) {
-  if (!userland_loader.empty() && !experimental_modules) {
-    errors->push_back("--loader requires --experimental-modules be enabled");
+  if (has_policy_integrity_string && experimental_policy.empty()) {
+    errors->push_back("--policy-integrity requires "
+                      "--experimental-policy be enabled");
+  }
+  if (has_policy_integrity_string && experimental_policy_integrity.empty()) {
+    errors->push_back("--policy-integrity cannot be empty");
   }
 
   if (!module_type.empty()) {
-    if (!experimental_modules) {
-      errors->push_back("--input-type requires "
-                        "--experimental-modules to be enabled");
-    }
     if (module_type != "commonjs" && module_type != "module") {
       errors->push_back("--input-type must be \"module\" or \"commonjs\"");
     }
   }
 
-  if (experimental_json_modules && !experimental_modules) {
-    errors->push_back("--experimental-json-modules requires "
-                      "--experimental-modules be enabled");
-  }
-
   if (!es_module_specifier_resolution.empty()) {
-    if (!experimental_modules) {
-      errors->push_back("--es-module-specifier-resolution requires "
-                        "--experimental-modules be enabled");
+    if (!experimental_specifier_resolution.empty()) {
+      errors->push_back(
+        "bad option: cannot use --es-module-specifier-resolution"
+        " and --experimental-specifier-resolution at the same time");
+    } else {
+      experimental_specifier_resolution = es_module_specifier_resolution;
+      if (experimental_specifier_resolution != "node" &&
+          experimental_specifier_resolution != "explicit") {
+        errors->push_back(
+          "invalid value for --es-module-specifier-resolution");
+      }
     }
-    if (es_module_specifier_resolution != "node" &&
-        es_module_specifier_resolution != "explicit") {
-      errors->push_back("invalid value for --es-module-specifier-resolution");
+  } else if (!experimental_specifier_resolution.empty()) {
+    if (experimental_specifier_resolution != "node" &&
+        experimental_specifier_resolution != "explicit") {
+      errors->push_back(
+        "invalid value for --experimental-specifier-resolution");
     }
   }
 
@@ -137,15 +159,16 @@ void EnvironmentOptions::CheckOptions(std::vector<std::string>* errors) {
     errors->push_back("either --check or --eval can be used, not both");
   }
 
-  if (http_parser != "legacy" && http_parser != "llhttp") {
-    errors->push_back("invalid value for --http-parser");
-  }
-
   if (!unhandled_rejections.empty() &&
       unhandled_rejections != "strict" &&
       unhandled_rejections != "warn" &&
       unhandled_rejections != "none") {
     errors->push_back("invalid value for --unhandled-rejections");
+  }
+
+  if (tls_min_v1_3 && tls_max_v1_2) {
+    errors->push_back("either --tls-min-v1.3 or --tls-max-v1.2 can be "
+                      "used, not both");
   }
 
 #if HAVE_INSPECTOR
@@ -156,8 +179,26 @@ void EnvironmentOptions::CheckOptions(std::vector<std::string>* errors) {
     if (!cpu_prof_dir.empty()) {
       errors->push_back("--cpu-prof-dir must be used with --cpu-prof");
     }
+    // We can't catch the case where the value passed is the default value,
+    // then the option just becomes a noop which is fine.
+    if (cpu_prof_interval != kDefaultCpuProfInterval) {
+      errors->push_back("--cpu-prof-interval must be used with --cpu-prof");
+    }
   }
 
+  if (!heap_prof) {
+    if (!heap_prof_name.empty()) {
+      errors->push_back("--heap-prof-name must be used with --heap-prof");
+    }
+    if (!heap_prof_dir.empty()) {
+      errors->push_back("--heap-prof-dir must be used with --heap-prof");
+    }
+    // We can't catch the case where the value passed is the default value,
+    // then the option just becomes a noop which is fine.
+    if (heap_prof_interval != kDefaultHeapProfInterval) {
+      errors->push_back("--heap-prof-interval must be used with --heap-prof");
+    }
+  }
   debug_options_.CheckOptions(errors);
 #endif  // HAVE_INSPECTOR
 }
@@ -193,6 +234,17 @@ class PerProcessOptionsParser : public OptionsParser<PerProcessOptions> {
 #if HAVE_INSPECTOR
 const DebugOptionsParser _dop_instance{};
 const EnvironmentOptionsParser _eop_instance{_dop_instance};
+
+// This Parse is not dead code. It is used by embedders (e.g., Electron).
+template <>
+void Parse(
+  StringVector* const args, StringVector* const exec_args,
+  StringVector* const v8_args,
+  DebugOptions* const options,
+  OptionEnvvarSettings required_env_settings, StringVector* const errors) {
+  _dop_instance.Parse(
+    args, exec_args, v8_args, options, required_env_settings, errors);
+}
 #else
 const EnvironmentOptionsParser _eop_instance{};
 #endif  // HAVE_INSPECTOR
@@ -237,7 +289,9 @@ DebugOptionsParser::DebugOptionsParser() {
   AddAlias("--inspect=", { "--inspect-port", "--inspect" });
 
   AddOption("--debug", "", &DebugOptions::deprecated_debug);
-  AddAlias("--debug=", { "--inspect-port", "--debug" });
+  AddAlias("--debug=", "--debug");
+  AddOption("--debug-brk", "", &DebugOptions::deprecated_debug);
+  AddAlias("--debug-brk=", "--debug-brk");
 
   AddOption("--inspect-brk",
             "activate inspector on host:port and break at start of user script",
@@ -250,25 +304,49 @@ DebugOptionsParser::DebugOptionsParser() {
   Implies("--inspect-brk-node", "--inspect");
   AddAlias("--inspect-brk-node=", { "--inspect-port", "--inspect-brk-node" });
 
-  AddOption("--debug-brk", "", &DebugOptions::break_first_line);
-  Implies("--debug-brk", "--debug");
-  AddAlias("--debug-brk=", { "--inspect-port", "--debug-brk" });
+  AddOption("--inspect-publish-uid",
+            "comma separated list of destinations for inspector uid"
+            "(default: stderr,http)",
+            &DebugOptions::inspect_publish_uid_string,
+            kAllowedInEnvironment);
 }
 
 EnvironmentOptionsParser::EnvironmentOptionsParser() {
+  AddOption("--enable-source-maps",
+            "experimental Source Map V3 support",
+            &EnvironmentOptions::enable_source_maps,
+            kAllowedInEnvironment);
   AddOption("--experimental-json-modules",
             "experimental JSON interop support for the ES Module loader",
             &EnvironmentOptions::experimental_json_modules,
             kAllowedInEnvironment);
+  AddOption("--experimental-loader",
+            "use the specified module as a custom loader",
+            &EnvironmentOptions::userland_loader,
+            kAllowedInEnvironment);
+  AddAlias("--loader", "--experimental-loader");
   AddOption("--experimental-modules",
-            "experimental ES Module support and caching modules",
+            "experimental modules features",
             &EnvironmentOptions::experimental_modules,
+            kAllowedInEnvironment);
+  AddOption("--experimental-wasm-modules",
+            "experimental ES Module support for webassembly modules",
+            &EnvironmentOptions::experimental_wasm_modules,
             kAllowedInEnvironment);
   AddOption("--experimental-policy",
             "use the specified file as a "
             "security policy",
             &EnvironmentOptions::experimental_policy,
             kAllowedInEnvironment);
+  AddOption("[has_policy_integrity_string]",
+            "",
+            &EnvironmentOptions::has_policy_integrity_string);
+  AddOption("--policy-integrity",
+            "ensure the security policy contents match "
+            "the specified integrity",
+            &EnvironmentOptions::experimental_policy_integrity,
+            kAllowedInEnvironment);
+  Implies("--policy-integrity", "[has_policy_integrity_string]");
   AddOption("--experimental-repl-await",
             "experimental await keyword support in REPL",
             &EnvironmentOptions::experimental_repl_await,
@@ -284,6 +362,10 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             &EnvironmentOptions::experimental_report,
             kAllowedInEnvironment);
 #endif  // NODE_REPORT
+  AddOption("--experimental-wasi-unstable-preview1",
+            "experimental WASI support",
+            &EnvironmentOptions::experimental_wasi,
+            kAllowedInEnvironment);
   AddOption("--expose-internals", "", &EnvironmentOptions::expose_internals);
   AddOption("--frozen-intrinsics",
             "experimental frozen intrinsics support",
@@ -293,23 +375,22 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             "Generate heap snapshot on specified signal",
             &EnvironmentOptions::heap_snapshot_signal,
             kAllowedInEnvironment);
-  AddOption("--http-parser",
-            "Select which HTTP parser to use; either 'legacy' or 'llhttp' "
-            "(default: llhttp).",
-            &EnvironmentOptions::http_parser,
+  AddOption("--http-parser", "", NoOp{}, kAllowedInEnvironment);
+  AddOption("--insecure-http-parser",
+            "use an insecure HTTP parser that accepts invalid HTTP headers",
+            &EnvironmentOptions::insecure_http_parser,
             kAllowedInEnvironment);
   AddOption("--input-type",
             "set module type for string input",
             &EnvironmentOptions::module_type,
             kAllowedInEnvironment);
-  AddOption("--loader",
-            "(with --experimental-modules) use the specified file as a "
-            "custom loader",
-            &EnvironmentOptions::userland_loader,
-            kAllowedInEnvironment);
-  AddOption("--es-module-specifier-resolution",
+  AddOption("--experimental-specifier-resolution",
             "Select extension resolution algorithm for es modules; "
             "either 'explicit' (default) or 'node'",
+            &EnvironmentOptions::experimental_specifier_resolution,
+            kAllowedInEnvironment);
+  AddOption("--es-module-specifier-resolution",
+            "",
             &EnvironmentOptions::es_module_specifier_resolution,
             kAllowedInEnvironment);
   AddOption("--no-deprecation",
@@ -323,6 +404,10 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
   AddOption("--no-warnings",
             "silence all process warnings",
             &EnvironmentOptions::no_warnings,
+            kAllowedInEnvironment);
+  AddOption("--force-context-aware",
+            "disable loading non-context-aware addons",
+            &EnvironmentOptions::force_context_aware,
             kAllowedInEnvironment);
   AddOption("--pending-deprecation",
             "emit pending deprecation warnings",
@@ -351,15 +436,43 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             "specified file name of the V8 CPU profile generated with "
             "--cpu-prof",
             &EnvironmentOptions::cpu_prof_name);
+  AddOption("--cpu-prof-interval",
+            "specified sampling interval in microseconds for the V8 CPU "
+            "profile generated with --cpu-prof. (default: 1000)",
+            &EnvironmentOptions::cpu_prof_interval);
   AddOption("--cpu-prof-dir",
             "Directory where the V8 profiles generated by --cpu-prof will be "
             "placed. Does not affect --prof.",
             &EnvironmentOptions::cpu_prof_dir);
+  AddOption(
+      "--heap-prof",
+      "Start the V8 heap profiler on start up, and write the heap profile "
+      "to disk before exit. If --heap-prof-dir is not specified, write "
+      "the profile to the current working directory.",
+      &EnvironmentOptions::heap_prof);
+  AddOption("--heap-prof-name",
+            "specified file name of the V8 CPU profile generated with "
+            "--heap-prof",
+            &EnvironmentOptions::heap_prof_name);
+  AddOption("--heap-prof-dir",
+            "Directory where the V8 heap profiles generated by --heap-prof "
+            "will be placed.",
+            &EnvironmentOptions::heap_prof_dir);
+  AddOption("--heap-prof-interval",
+            "specified sampling interval in bytes for the V8 heap "
+            "profile generated with --heap-prof. (default: 512 * 1024)",
+            &EnvironmentOptions::heap_prof_interval);
 #endif  // HAVE_INSPECTOR
+  AddOption("--max-http-header-size",
+            "set the maximum size of HTTP headers (default: 8192 (8KB))",
+            &EnvironmentOptions::max_http_header_size,
+            kAllowedInEnvironment);
   AddOption("--redirect-warnings",
             "write warnings to file instead of stderr",
             &EnvironmentOptions::redirect_warnings,
             kAllowedInEnvironment);
+  AddOption("--test-udp-no-try-send", "",  // For testing only.
+            &EnvironmentOptions::test_udp_no_try_send);
   AddOption("--throw-deprecation",
             "throw an exception on deprecations",
             &EnvironmentOptions::throw_deprecation,
@@ -368,10 +481,22 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             "show stack traces on deprecations",
             &EnvironmentOptions::trace_deprecation,
             kAllowedInEnvironment);
+  AddOption("--trace-exit",
+            "show stack trace when an environment exits",
+            &EnvironmentOptions::trace_exit,
+            kAllowedInEnvironment);
   AddOption("--trace-sync-io",
             "show stack trace when use of sync IO is detected after the "
             "first tick",
             &EnvironmentOptions::trace_sync_io,
+            kAllowedInEnvironment);
+  AddOption("--trace-tls",
+            "prints TLS packet trace information to stderr",
+            &EnvironmentOptions::trace_tls,
+            kAllowedInEnvironment);
+  AddOption("--trace-uncaught",
+            "show stack traces for the `throw` behind uncaught exceptions",
+            &EnvironmentOptions::trace_uncaught,
             kAllowedInEnvironment);
   AddOption("--trace-warnings",
             "show stack traces on process warnings",
@@ -416,6 +541,10 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
 
   AddOption("--napi-modules", "", NoOp{}, kAllowedInEnvironment);
 
+  AddOption("--tls-keylog",
+            "log TLS decryption keys to named file for traffic analysis",
+            &EnvironmentOptions::tls_keylog, kAllowedInEnvironment);
+
   AddOption("--tls-min-v1.0",
             "set default TLS minimum to TLSv1.0 (default: TLSv1.2)",
             &EnvironmentOptions::tls_min_v1_0,
@@ -423,6 +552,10 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
   AddOption("--tls-min-v1.1",
             "set default TLS minimum to TLSv1.1 (default: TLSv1.2)",
             &EnvironmentOptions::tls_min_v1_1,
+            kAllowedInEnvironment);
+  AddOption("--tls-min-v1.2",
+            "set default TLS minimum to TLSv1.2 (default: TLSv1.2)",
+            &EnvironmentOptions::tls_min_v1_2,
             kAllowedInEnvironment);
   AddOption("--tls-min-v1.3",
             "set default TLS minimum to TLSv1.3 (default: TLSv1.2)",
@@ -448,6 +581,10 @@ PerIsolateOptionsParser::PerIsolateOptionsParser(
             "track heap object allocations for heap snapshots",
             &PerIsolateOptions::track_heap_objects,
             kAllowedInEnvironment);
+  AddOption("--no-node-snapshot",
+            "",  // It's a debug-only option.
+            &PerIsolateOptions::no_node_snapshot,
+            kAllowedInEnvironment);
 
   // Explicitly add some V8 flags to mark them as allowed in NODE_OPTIONS.
   AddOption("--abort-on-uncaught-exception",
@@ -455,6 +592,9 @@ PerIsolateOptionsParser::PerIsolateOptionsParser(
             "for analysis",
             V8Option{},
             kAllowedInEnvironment);
+  AddOption("--interpreted-frames-native-stack",
+            "help system profilers to translate JavaScript interpreted frames",
+            V8Option{}, kAllowedInEnvironment);
   AddOption("--max-old-space-size", "", V8Option{}, kAllowedInEnvironment);
   AddOption("--perf-basic-prof", "", V8Option{}, kAllowedInEnvironment);
   AddOption("--perf-basic-prof-only-functions",
@@ -467,6 +607,10 @@ PerIsolateOptionsParser::PerIsolateOptionsParser(
             V8Option{},
             kAllowedInEnvironment);
   AddOption("--stack-trace-limit", "", V8Option{}, kAllowedInEnvironment);
+  AddOption("--disallow-code-generation-from-strings",
+            "disallow eval and friends",
+            V8Option{},
+            kAllowedInEnvironment);
 
 #ifdef NODE_REPORT
   AddOption("--report-uncaught-exception",
@@ -519,10 +663,6 @@ PerProcessOptionsParser::PerProcessOptionsParser(
             kAllowedInEnvironment);
   AddAlias("--trace-events-enabled", {
     "--trace-event-categories", "v8,node,node.async_hooks" });
-  AddOption("--max-http-header-size",
-            "set the maximum size of HTTP headers (default: 8KB)",
-            &PerProcessOptions::max_http_header_size,
-            kAllowedInEnvironment);
   AddOption("--v8-pool-size",
             "set V8's thread pool size",
             &PerProcessOptions::v8_thread_pool_size,
@@ -537,7 +677,12 @@ PerProcessOptionsParser::PerProcessOptionsParser(
             &PerProcessOptions::debug_arraybuffer_allocations,
             kAllowedInEnvironment);
 
-  AddOption("--security-reverts", "", &PerProcessOptions::security_reverts);
+
+  // 12.x renamed this inadvertently, so alias it for consistency within the
+  // release line, while using the original name for consistency with older
+  // release lines.
+  AddOption("--security-revert", "", &PerProcessOptions::security_reverts);
+  AddAlias("--security-reverts", "--security-revert");
   AddOption("--completion-bash",
             "print source-able bash completion script",
             &PerProcessOptions::print_bash_completion);
@@ -608,6 +753,18 @@ PerProcessOptionsParser::PerProcessOptionsParser(
             kAllowedInEnvironment);
 #endif
 #endif
+  AddOption("--use-largepages",
+            "Map the Node.js static code to large pages. Options are "
+            "'off' (the default value, meaning do not map), "
+            "'on' (map and ignore failure, reporting it to stderr), "
+            "or 'silent' (map and silently ignore failure)",
+            &PerProcessOptions::use_largepages,
+            kAllowedInEnvironment);
+
+  AddOption("--trace-sigint",
+            "enable printing JavaScript stacktrace on SIGINT",
+            &PerProcessOptions::trace_sigint,
+            kAllowedInEnvironment);
 
   Insert(iop, &PerProcessOptions::get_per_isolate_options);
 }
@@ -656,6 +813,43 @@ HostPort SplitHostPort(const std::string& arg,
                     ParseAndValidatePort(arg.substr(colon + 1), errors) };
 }
 
+std::string GetBashCompletion() {
+  Mutex::ScopedLock lock(per_process::cli_options_mutex);
+  const auto& parser = _ppop_instance;
+
+  std::ostringstream out;
+
+  out << "_node_complete() {\n"
+         "  local cur_word options\n"
+         "  cur_word=\"${COMP_WORDS[COMP_CWORD]}\"\n"
+         "  if [[ \"${cur_word}\" == -* ]] ; then\n"
+         "    COMPREPLY=( $(compgen -W '";
+
+  for (const auto& item : parser.options_) {
+    if (item.first[0] != '[') {
+      out << item.first << " ";
+    }
+  }
+  for (const auto& item : parser.aliases_) {
+    if (item.first[0] != '[') {
+      out << item.first << " ";
+    }
+  }
+  if (parser.aliases_.size() > 0) {
+    out.seekp(-1, out.cur);  // Strip the trailing space
+  }
+
+  out << "' -- \"${cur_word}\") )\n"
+         "    return 0\n"
+         "  else\n"
+         "    COMPREPLY=( $(compgen -f \"${cur_word}\") )\n"
+         "    return 0\n"
+         "  fi\n"
+         "}\n"
+         "complete -F _node_complete node node_g";
+  return out.str();
+}
+
 // Return a map containing all the options and their metadata as well
 // as the aliases
 void GetOptions(const FunctionCallbackInfo<Value>& args) {
@@ -678,7 +872,7 @@ void GetOptions(const FunctionCallbackInfo<Value>& args) {
   per_process::cli_options->per_isolate = env->isolate_data()->options();
   auto original_per_env = per_process::cli_options->per_isolate->per_env;
   per_process::cli_options->per_isolate->per_env = env->options();
-  OnScopeLeave on_scope_leave([&]() {
+  auto on_scope_leave = OnScopeLeave([&]() {
     per_process::cli_options->per_isolate->per_env = original_per_env;
     per_process::cli_options->per_isolate = original_per_isolate;
   });

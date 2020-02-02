@@ -39,22 +39,16 @@ class CachedTemplateObject final : public Tuple3 {
 // TemplateObjectDescription is a tuple of raw strings and cooked strings for
 // tagged template literals. Used to communicate with the runtime for template
 // object creation within the {Runtime_GetTemplateObject} method.
-class TemplateObjectDescription final : public Tuple2 {
+class TemplateObjectDescription final
+    : public TorqueGeneratedTemplateObjectDescription<TemplateObjectDescription,
+                                                      Struct> {
  public:
-  DECL_ACCESSORS(raw_strings, FixedArray)
-  DECL_ACCESSORS(cooked_strings, FixedArray)
-
   static Handle<JSArray> GetTemplateObject(
-      Isolate* isolate, Handle<Context> native_context,
+      Isolate* isolate, Handle<NativeContext> native_context,
       Handle<TemplateObjectDescription> description,
       Handle<SharedFunctionInfo> shared_info, int slot_id);
 
-  DECL_CAST(TemplateObjectDescription)
-
-  static constexpr int kRawStringsOffset = kValue1Offset;
-  static constexpr int kCookedStringsOffset = kValue2Offset;
-
-  OBJECT_CONSTRUCTORS(TemplateObjectDescription, Tuple2);
+  TQ_OBJECT_CONSTRUCTORS(TemplateObjectDescription)
 };
 
 }  // namespace internal

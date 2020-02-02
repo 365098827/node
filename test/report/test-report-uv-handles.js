@@ -2,6 +2,9 @@
 
 // Testcase to check reporting of uv handles.
 const common = require('../common');
+if (common.isIBMi)
+  common.skip('IBMi does not support fs.watch()');
+
 common.skipIfReportDisabled();
 if (process.argv[2] === 'child') {
   // Exit on loss of parent process
@@ -43,7 +46,7 @@ if (process.argv[2] === 'child') {
   const server = http.createServer((req, res) => {
     req.on('end', () => {
       // Generate the report while the connection is active.
-      console.log(process.report.getReport());
+      console.log(JSON.stringify(process.report.getReport(), null, 2));
       child_process.kill();
 
       res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -85,7 +88,7 @@ if (process.argv[2] === 'child') {
   const report_msg = 'Report files were written: unexpectedly';
   child.stdout.on('data', (chunk) => { stdout += chunk; });
   child.on('exit', common.mustCall((code, signal) => {
-    assert.deepStrictEqual(code, 0, 'Process exited unexpectedly with code' +
+    assert.deepStrictEqual(code, 0, 'Process exited unexpectedly with code: ' +
                            `${code}`);
     assert.deepStrictEqual(signal, null, 'Process should have exited cleanly,' +
                             ` but did not: ${signal}`);

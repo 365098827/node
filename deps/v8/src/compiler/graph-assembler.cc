@@ -4,7 +4,7 @@
 
 #include "src/compiler/graph-assembler.h"
 
-#include "src/code-factory.h"
+#include "src/codegen/code-factory.h"
 #include "src/compiler/linkage.h"
 
 namespace v8 {
@@ -52,6 +52,9 @@ Node* GraphAssembler::HeapConstant(Handle<HeapObject> object) {
   return jsgraph()->HeapConstant(object);
 }
 
+Node* GraphAssembler::NumberConstant(double value) {
+  return jsgraph()->Constant(value);
+}
 
 Node* GraphAssembler::ExternalConstant(ExternalReference ref) {
   return jsgraph()->ExternalConstant(ref);
@@ -91,6 +94,18 @@ PURE_ASSEMBLER_MACH_BINOP_LIST(PURE_BINOP_DEF)
 CHECKED_ASSEMBLER_MACH_BINOP_LIST(CHECKED_BINOP_DEF)
 #undef CHECKED_BINOP_DEF
 
+Node* GraphAssembler::IntPtrEqual(Node* left, Node* right) {
+  return WordEqual(left, right);
+}
+
+Node* GraphAssembler::TaggedEqual(Node* left, Node* right) {
+  if (COMPRESS_POINTERS_BOOL) {
+    return Word32Equal(ChangeTaggedToCompressed(left),
+                       ChangeTaggedToCompressed(right));
+  }
+  return WordEqual(left, right);
+}
+
 Node* GraphAssembler::Float64RoundDown(Node* value) {
   CHECK(machine()->Float64RoundDown().IsSupported());
   return graph()->NewNode(machine()->Float64RoundDown().op(), value);
@@ -105,27 +120,33 @@ Node* GraphAssembler::Projection(int index, Node* value) {
   return graph()->NewNode(common()->Projection(index), value, current_control_);
 }
 
-Node* GraphAssembler::Allocate(PretenureFlag pretenure, Node* size) {
-  return current_control_ = current_effect_ =
-             graph()->NewNode(simplified()->AllocateRaw(Type::Any(), pretenure),
-                              size, current_effect_, current_control_);
+Node* GraphAssembler::Allocate(AllocationType allocation, Node* size) {
+  return current_control_ = current_effect_ = graph()->NewNode(
+             simplified()->AllocateRaw(Type::Any(), allocation), size,
+             current_effect_, current_control_);
 }
 
 Node* GraphAssembler::LoadField(FieldAccess const& access, Node* object) {
-  return current_effect_ =
-             graph()->NewNode(simplified()->LoadField(access), object,
-                              current_effect_, current_control_);
+  Node* value = current_effect_ =
+      graph()->NewNode(simplified()->LoadField(access), object, current_effect_,
+                       current_control_);
+  return InsertDecompressionIfNeeded(access.machine_type.representation(),
+                                     value);
 }
 
 Node* GraphAssembler::LoadElement(ElementAccess const& access, Node* object,
                                   Node* index) {
-  return current_effect_ =
-             graph()->NewNode(simplified()->LoadElement(access), object, index,
-                              current_effect_, current_control_);
+  Node* value = current_effect_ =
+      graph()->NewNode(simplified()->LoadElement(access), object, index,
+                       current_effect_, current_control_);
+  return InsertDecompressionIfNeeded(access.machine_type.representation(),
+                                     value);
 }
 
 Node* GraphAssembler::StoreField(FieldAccess const& access, Node* object,
                                  Node* value) {
+  value =
+      InsertCompressionIfNeeded(access.machine_type.representation(), value);
   return current_effect_ =
              graph()->NewNode(simplified()->StoreField(access), object, value,
                               current_effect_, current_control_);
@@ -133,6 +154,8 @@ Node* GraphAssembler::StoreField(FieldAccess const& access, Node* object,
 
 Node* GraphAssembler::StoreElement(ElementAccess const& access, Node* object,
                                    Node* index, Node* value) {
+  value =
+      InsertCompressionIfNeeded(access.machine_type.representation(), value);
   return current_effect_ =
              graph()->NewNode(simplified()->StoreElement(access), object, index,
                               value, current_effect_, current_control_);
@@ -150,15 +173,16 @@ Node* GraphAssembler::Unreachable() {
 
 Node* GraphAssembler::Store(StoreRepresentation rep, Node* object, Node* offset,
                             Node* value) {
+  value = InsertCompressionIfNeeded(rep.representation(), value);
   return current_effect_ =
              graph()->NewNode(machine()->Store(rep), object, offset, value,
                               current_effect_, current_control_);
 }
 
-Node* GraphAssembler::Load(MachineType rep, Node* object, Node* offset) {
-  return current_effect_ =
-             graph()->NewNode(machine()->Load(rep), object, offset,
-                              current_effect_, current_control_);
+Node* GraphAssembler::Load(MachineType type, Node* object, Node* offset) {
+  Node* value = current_effect_ = graph()->NewNode(
+      machine()->Load(type), object, offset, current_effect_, current_control_);
+  return InsertDecompressionIfNeeded(type.representation(), value);
 }
 
 Node* GraphAssembler::StoreUnaligned(MachineRepresentation rep, Node* object,
@@ -172,13 +196,13 @@ Node* GraphAssembler::StoreUnaligned(MachineRepresentation rep, Node* object,
                                             current_effect_, current_control_);
 }
 
-Node* GraphAssembler::LoadUnaligned(MachineType rep, Node* object,
+Node* GraphAssembler::LoadUnaligned(MachineType type, Node* object,
                                     Node* offset) {
   Operator const* const op =
-      (rep.representation() == MachineRepresentation::kWord8 ||
-       machine()->UnalignedLoadSupported(rep.representation()))
-          ? machine()->Load(rep)
-          : machine()->UnalignedLoad(rep);
+      (type.representation() == MachineRepresentation::kWord8 ||
+       machine()->UnalignedLoadSupported(type.representation()))
+          ? machine()->Load(type)
+          : machine()->UnalignedLoad(type);
   return current_effect_ = graph()->NewNode(op, object, offset, current_effect_,
                                             current_control_);
 }
@@ -212,6 +236,12 @@ Node* GraphAssembler::BitcastTaggedToWord(Node* value) {
                               current_effect_, current_control_);
 }
 
+Node* GraphAssembler::BitcastTaggedToWordForTagAndSmiBits(Node* value) {
+  return current_effect_ =
+             graph()->NewNode(machine()->BitcastTaggedToWordForTagAndSmiBits(),
+                              value, current_effect_, current_control_);
+}
+
 Node* GraphAssembler::Word32PoisonOnSpeculation(Node* value) {
   return current_effect_ =
              graph()->NewNode(machine()->Word32PoisonOnSpeculation(), value,
@@ -219,7 +249,7 @@ Node* GraphAssembler::Word32PoisonOnSpeculation(Node* value) {
 }
 
 Node* GraphAssembler::DeoptimizeIf(DeoptimizeReason reason,
-                                   VectorSlotPair const& feedback,
+                                   FeedbackSource const& feedback,
                                    Node* condition, Node* frame_state,
                                    IsSafetyCheck is_safety_check) {
   return current_control_ = current_effect_ = graph()->NewNode(
@@ -229,7 +259,7 @@ Node* GraphAssembler::DeoptimizeIf(DeoptimizeReason reason,
 }
 
 Node* GraphAssembler::DeoptimizeIfNot(DeoptimizeReason reason,
-                                      VectorSlotPair const& feedback,
+                                      FeedbackSource const& feedback,
                                       Node* condition, Node* frame_state,
                                       IsSafetyCheck is_safety_check) {
   return current_control_ = current_effect_ = graph()->NewNode(
@@ -272,6 +302,50 @@ Node* GraphAssembler::ExtractCurrentEffect() {
   Node* result = current_effect_;
   current_effect_ = nullptr;
   return result;
+}
+
+Node* GraphAssembler::InsertDecompressionIfNeeded(MachineRepresentation rep,
+                                                  Node* value) {
+  if (COMPRESS_POINTERS_BOOL) {
+    switch (rep) {
+      case MachineRepresentation::kCompressedPointer:
+        value = graph()->NewNode(
+            machine()->ChangeCompressedPointerToTaggedPointer(), value);
+        break;
+      case MachineRepresentation::kCompressedSigned:
+        value = graph()->NewNode(
+            machine()->ChangeCompressedSignedToTaggedSigned(), value);
+        break;
+      case MachineRepresentation::kCompressed:
+        value = graph()->NewNode(machine()->ChangeCompressedToTagged(), value);
+        break;
+      default:
+        break;
+    }
+  }
+  return value;
+}
+
+Node* GraphAssembler::InsertCompressionIfNeeded(MachineRepresentation rep,
+                                                Node* value) {
+  if (COMPRESS_POINTERS_BOOL) {
+    switch (rep) {
+      case MachineRepresentation::kCompressedPointer:
+        value = graph()->NewNode(
+            machine()->ChangeTaggedPointerToCompressedPointer(), value);
+        break;
+      case MachineRepresentation::kCompressedSigned:
+        value = graph()->NewNode(
+            machine()->ChangeTaggedSignedToCompressedSigned(), value);
+        break;
+      case MachineRepresentation::kCompressed:
+        value = graph()->NewNode(machine()->ChangeTaggedToCompressed(), value);
+        break;
+      default:
+        break;
+    }
+  }
+  return value;
 }
 
 void GraphAssembler::Reset(Node* effect, Node* control) {

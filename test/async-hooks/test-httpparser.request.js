@@ -1,4 +1,3 @@
-// Flags: --expose-internals
 'use strict';
 
 const common = require('../common');
@@ -20,7 +19,8 @@ const request = Buffer.from(
   'GET /hello HTTP/1.1\r\n\r\n'
 );
 
-const parser = new HTTPParser(REQUEST);
+const parser = new HTTPParser();
+parser.initialize(REQUEST, {});
 const as = hooks.activitiesOfTypes('HTTPINCOMINGMESSAGE');
 const httpparser = as[0];
 

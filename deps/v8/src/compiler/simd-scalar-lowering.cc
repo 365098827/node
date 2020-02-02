@@ -16,6 +16,7 @@ namespace internal {
 namespace compiler {
 
 namespace {
+static const int kNumLanes64 = 2;
 static const int kNumLanes32 = 4;
 static const int kNumLanes16 = 8;
 static const int kNumLanes8 = 16;
@@ -76,6 +77,8 @@ void SimdScalarLowering::LowerGraph() {
   }
 }
 
+#define FOREACH_INT64X2_OPCODE(V) V(I64x2Splat)
+
 #define FOREACH_INT32X4_OPCODE(V) \
   V(I32x4Splat)                   \
   V(I32x4ExtractLane)             \
@@ -119,6 +122,8 @@ void SimdScalarLowering::LowerGraph() {
   V(S1x16AnyTrue)                 \
   V(S1x16AllTrue)
 
+#define FOREACH_FLOAT64X2_OPCODE(V) V(F64x2Splat)
+
 #define FOREACH_FLOAT32X4_OPCODE(V) \
   V(F32x4Splat)                     \
   V(F32x4ExtractLane)               \
@@ -127,12 +132,14 @@ void SimdScalarLowering::LowerGraph() {
   V(F32x4UConvertI32x4)             \
   V(F32x4Abs)                       \
   V(F32x4Neg)                       \
+  V(F32x4Sqrt)                      \
   V(F32x4RecipApprox)               \
   V(F32x4RecipSqrtApprox)           \
   V(F32x4Add)                       \
   V(F32x4AddHoriz)                  \
   V(F32x4Sub)                       \
   V(F32x4Mul)                       \
+  V(F32x4Div)                       \
   V(F32x4Min)                       \
   V(F32x4Max)
 
@@ -204,12 +211,17 @@ void SimdScalarLowering::LowerGraph() {
   V(I8x16LeS)                     \
   V(I8x16LtU)                     \
   V(I8x16LeU)                     \
+  V(S8x16Swizzle)                 \
   V(S8x16Shuffle)
 
 MachineType SimdScalarLowering::MachineTypeFrom(SimdType simdType) {
   switch (simdType) {
+    case SimdType::kFloat64x2:
+      return MachineType::Float64();
     case SimdType::kFloat32x4:
       return MachineType::Float32();
+    case SimdType::kInt64x2:
+      return MachineType::Int64();
     case SimdType::kInt32x4:
       return MachineType::Int32();
     case SimdType::kInt16x8:
@@ -223,6 +235,14 @@ MachineType SimdScalarLowering::MachineTypeFrom(SimdType simdType) {
 void SimdScalarLowering::SetLoweredType(Node* node, Node* output) {
   switch (node->opcode()) {
 #define CASE_STMT(name) case IrOpcode::k##name:
+    FOREACH_FLOAT64X2_OPCODE(CASE_STMT) {
+      replacements_[node->id()].type = SimdType::kFloat64x2;
+      break;
+    }
+    FOREACH_INT64X2_OPCODE(CASE_STMT) {
+      replacements_[node->id()].type = SimdType::kInt64x2;
+      break;
+    }
     FOREACH_INT32X4_OPCODE(CASE_STMT)
     case IrOpcode::kReturn:
     case IrOpcode::kParameter:
@@ -326,7 +346,9 @@ static int GetReturnCountAfterLoweringSimd128(
 
 int SimdScalarLowering::NumLanes(SimdType type) {
   int num_lanes = 0;
-  if (type == SimdType::kFloat32x4 || type == SimdType::kInt32x4) {
+  if (type == SimdType::kFloat64x2 || type == SimdType::kInt64x2) {
+    num_lanes = kNumLanes64;
+  } else if (type == SimdType::kFloat32x4 || type == SimdType::kInt32x4) {
     num_lanes = kNumLanes32;
   } else if (type == SimdType::kInt16x8) {
     num_lanes = kNumLanes16;
@@ -920,6 +942,28 @@ void SimdScalarLowering::LowerNode(Node* node) {
       }
       break;
     }
+    case IrOpcode::kSimd128ReverseBytes: {
+      DCHECK_EQ(1, node->InputCount());
+      bool is_float = ReplacementType(node->InputAt(0)) == SimdType::kFloat32x4;
+      replacements_[node->id()].type =
+          is_float ? SimdType::kFloat32x4 : SimdType::kInt32x4;
+      Node** rep = GetReplacementsWithType(
+          node->InputAt(0),
+          is_float ? SimdType::kFloat32x4 : SimdType::kInt32x4);
+      Node* rep_node[kNumLanes32];
+      for (int i = 0; i < kNumLanes32; ++i) {
+        Node* temp = is_float ? graph()->NewNode(
+                                    machine()->BitcastFloat32ToInt32(), rep[i])
+                              : rep[i];
+        temp = graph()->NewNode(machine()->Word32ReverseBytes(), temp);
+        rep_node[kNumLanes32 - 1 - i] =
+            is_float
+                ? graph()->NewNode(machine()->BitcastInt32ToFloat32(), temp)
+                : temp;
+      }
+      ReplaceNode(node, rep_node, kNumLanes32);
+      break;
+    }
     case IrOpcode::kLoad:
     case IrOpcode::kUnalignedLoad:
     case IrOpcode::kProtectedLoad: {
@@ -1188,6 +1232,7 @@ void SimdScalarLowering::LowerNode(Node* node) {
       F32X4_BINOP_CASE(Add)
       F32X4_BINOP_CASE(Sub)
       F32X4_BINOP_CASE(Mul)
+      F32X4_BINOP_CASE(Div)
       F32X4_BINOP_CASE(Min)
       F32X4_BINOP_CASE(Max)
 #undef F32X4_BINOP_CASE
@@ -1198,7 +1243,8 @@ void SimdScalarLowering::LowerNode(Node* node) {
   }
       F32X4_UNOP_CASE(Abs)
       F32X4_UNOP_CASE(Neg)
-#undef F32x4_UNOP_CASE
+      F32X4_UNOP_CASE(Sqrt)
+#undef F32X4_UNOP_CASE
     case IrOpcode::kF32x4RecipApprox:
     case IrOpcode::kF32x4RecipSqrtApprox: {
       DCHECK_EQ(1, node->InputCount());
@@ -1223,8 +1269,10 @@ void SimdScalarLowering::LowerNode(Node* node) {
       LowerUnaryOp(node, SimdType::kInt32x4, machine()->RoundUint32ToFloat32());
       break;
     }
-    case IrOpcode::kI32x4Splat:
+    case IrOpcode::kF64x2Splat:
     case IrOpcode::kF32x4Splat:
+    case IrOpcode::kI64x2Splat:
+    case IrOpcode::kI32x4Splat:
     case IrOpcode::kI16x8Splat:
     case IrOpcode::kI8x16Splat: {
       Node** rep_node = zone()->NewArray<Node*>(num_lanes);
@@ -1345,9 +1393,48 @@ void SimdScalarLowering::LowerNode(Node* node) {
       ReplaceNode(node, rep_node, num_lanes);
       break;
     }
+    case IrOpcode::kS8x16Swizzle: {
+      DCHECK_EQ(2, node->InputCount());
+      Node** rep_left = GetReplacementsWithType(node->InputAt(0), rep_type);
+      Node** indices = GetReplacementsWithType(node->InputAt(1), rep_type);
+      Node** rep_nodes = zone()->NewArray<Node*>(num_lanes);
+      Node* stack_slot = graph()->NewNode(
+          machine()->StackSlot(MachineRepresentation::kSimd128));
+
+      // Push all num_lanes values into stack slot.
+      const Operator* store_op = machine()->Store(
+          StoreRepresentation(MachineRepresentation::kWord8, kNoWriteBarrier));
+      Node* effect_input = graph()->start();
+      for (int i = num_lanes - 1; i >= 0; i--) {
+        // We want all the stores to happen first before any of the loads
+        // below, so connect them via effect edge from i-1 to i.
+        Node* store =
+            graph()->NewNode(store_op, stack_slot, mcgraph_->Int32Constant(i),
+                             rep_left[i], effect_input, graph()->start());
+        effect_input = store;
+      }
+
+      for (int i = num_lanes - 1; i >= 0; i--) {
+        // Only select lane when index is < num_lanes, otherwise write 0 to
+        // lane. Use Uint32 to take care of negative indices.
+        Diamond d(graph(), common(),
+                  graph()->NewNode(machine()->Uint32LessThan(), indices[i],
+                                   mcgraph_->Int32Constant(num_lanes)));
+
+        Node* load =
+            graph()->NewNode(machine()->Load(LoadRepresentation::Uint8()),
+                             stack_slot, indices[i], effect_input, d.if_true);
+
+        rep_nodes[i] = d.Phi(MachineRepresentation::kWord8, load,
+                             mcgraph_->Int32Constant(0));
+      }
+
+      ReplaceNode(node, rep_nodes, num_lanes);
+      break;
+    }
     case IrOpcode::kS8x16Shuffle: {
       DCHECK_EQ(2, node->InputCount());
-      const uint8_t* shuffle = OpParameter<uint8_t*>(node->op());
+      const uint8_t* shuffle = S8x16ShuffleOf(node->op());
       Node** rep_left = GetReplacementsWithType(node->InputAt(0), rep_type);
       Node** rep_right = GetReplacementsWithType(node->InputAt(1), rep_type);
       Node** rep_node = zone()->NewArray<Node*>(16);
@@ -1369,7 +1456,7 @@ void SimdScalarLowering::LowerNode(Node* node) {
       int input_num_lanes = NumLanes(input_rep_type);
       Node** rep = GetReplacements(node->InputAt(0));
       Node** rep_node = zone()->NewArray<Node*>(num_lanes);
-      Node* true_node = mcgraph_->Int32Constant(-1);
+      Node* true_node = mcgraph_->Int32Constant(1);
       Node* false_node = mcgraph_->Int32Constant(0);
       Node* tmp_result = false_node;
       if (node->opcode() == IrOpcode::kS1x4AllTrue ||

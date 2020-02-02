@@ -7,10 +7,11 @@
 #include <ctime>
 
 #include "include/v8.h"
-#include "src/isolate.h"
-#include "src/objects-inl.h"
-#include "src/ostreams.h"
+#include "src/execution/isolate.h"
+#include "src/objects/objects-inl.h"
+#include "src/utils/ostreams.h"
 #include "src/wasm/wasm-engine.h"
+#include "src/wasm/wasm-feature-flags.h"
 #include "src/wasm/wasm-module-builder.h"
 #include "src/wasm/wasm-module.h"
 #include "src/wasm/wasm-objects-inl.h"
@@ -88,6 +89,12 @@ const char* ValueTypeToConstantName(ValueType type) {
       return "kWasmF32";
     case kWasmF64:
       return "kWasmF64";
+    case kWasmAnyRef:
+      return "kWasmAnyRef";
+    case kWasmFuncRef:
+      return "kWasmFuncRef";
+    case kWasmExnRef:
+      return "kWasmExnRef";
     default:
       UNREACHABLE();
   }
@@ -106,7 +113,7 @@ struct PrintName {
       : name(wire_bytes.GetNameOrNull(ref)) {}
 };
 std::ostream& operator<<(std::ostream& os, const PrintName& name) {
-  return os.write(name.name.start(), name.name.size());
+  return os.write(name.name.begin(), name.name.size());
 }
 }  // namespace
 
@@ -116,7 +123,8 @@ void GenerateTestCase(Isolate* isolate, ModuleWireBytes wire_bytes,
   auto enabled_features = i::wasm::WasmFeaturesFromIsolate(isolate);
   ModuleResult module_res = DecodeWasmModule(
       enabled_features, wire_bytes.start(), wire_bytes.end(), kVerifyFunctions,
-      ModuleOrigin::kWasmOrigin, isolate->counters(), isolate->allocator());
+      ModuleOrigin::kWasmOrigin, isolate->counters(),
+      isolate->wasm_engine()->allocator());
   CHECK(module_res.ok());
   WasmModule* module = module_res.value().get();
   CHECK_NOT_NULL(module);
@@ -138,6 +146,8 @@ void GenerateTestCase(Isolate* isolate, ModuleWireBytes wire_bytes,
         "// Use of this source code is governed by a BSD-style license that "
         "can be\n"
         "// found in the LICENSE file.\n"
+        "\n"
+        "// Flags: --wasm-staging\n"
         "\n"
         "load('test/mjsunit/wasm/wasm-module-builder.js');\n"
         "\n"
@@ -206,7 +216,7 @@ void GenerateTestCase(Isolate* isolate, ModuleWireBytes wire_bytes,
 
     // Add locals.
     BodyLocalDecls decls(&tmp_zone);
-    DecodeLocalDecls(enabled_features, &decls, func_code.start(),
+    DecodeLocalDecls(enabled_features, &decls, func_code.begin(),
                      func_code.end());
     if (!decls.type_list.empty()) {
       os << "    ";
@@ -224,7 +234,7 @@ void GenerateTestCase(Isolate* isolate, ModuleWireBytes wire_bytes,
     // Add body.
     os << "    .addBodyWithEnd([\n";
 
-    FunctionBody func_body(func.sig, func.code.offset(), func_code.start(),
+    FunctionBody func_body(func.sig, func.code.offset(), func_code.begin(),
                            func_code.end());
     PrintRawWasmCode(isolate->allocator(), func_body, module, kOmitLocals);
     os << "            ]);\n";
@@ -248,6 +258,14 @@ void GenerateTestCase(Isolate* isolate, ModuleWireBytes wire_bytes,
 
 void WasmExecutionFuzzer::FuzzWasmModule(Vector<const uint8_t> data,
                                          bool require_valid) {
+  // We explicitly enable staged WebAssembly features here to increase fuzzer
+  // coverage. For libfuzzer fuzzers it is not possible that the fuzzer enables
+  // the flag by itself.
+#define ENABLE_STAGED_FEATURES(feat, desc, val) \
+  FlagScope<bool> enable_##feat(&FLAG_experimental_wasm_##feat, true);
+  FOREACH_WASM_STAGING_FEATURE_FLAG(ENABLE_STAGED_FEATURES)
+#undef ENABLE_STAGED_FEATURES
+
   // Strictly enforce the input size limit. Note that setting "max_len" on the
   // fuzzer target is not enough, since different fuzzers are used and not all
   // respect that limit.
@@ -275,10 +293,10 @@ void WasmExecutionFuzzer::FuzzWasmModule(Vector<const uint8_t> data,
   std::unique_ptr<Handle<Object>[]> compiler_args;
   // The first byte builds the bitmask to control which function will be
   // compiled with Turbofan and which one with Liftoff.
-  uint8_t tier_mask = data.is_empty() ? 0 : data[0];
-  if (!data.is_empty()) data += 1;
-  if (!GenerateModule(i_isolate, &zone, data, buffer, num_args,
-                      interpreter_args, compiler_args)) {
+  uint8_t tier_mask = data.empty() ? 0 : data[0];
+  if (!data.empty()) data += 1;
+  if (!GenerateModule(i_isolate, &zone, data, &buffer, &num_args,
+                      &interpreter_args, &compiler_args)) {
     return;
   }
 

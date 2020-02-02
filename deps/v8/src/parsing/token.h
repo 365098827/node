@@ -6,8 +6,8 @@
 #define V8_PARSING_TOKEN_H_
 
 #include "src/base/logging.h"
-#include "src/globals.h"
-#include "src/utils.h"
+#include "src/common/globals.h"
+#include "src/utils/utils.h"
 
 namespace v8 {
 namespace internal {
@@ -65,6 +65,7 @@ namespace internal {
   T(LBRACK, "[", 0)                                                \
   /* END Property */                                               \
   /* END Member */                                                 \
+  T(QUESTION_PERIOD, "?.", 0)                                      \
   T(LPAREN, "(", 0)                                                \
   /* END PropertyOrCall */                                         \
   T(RPAREN, ")", 0)                                                \
@@ -95,6 +96,7 @@ namespace internal {
   /* IsBinaryOp() relies on this block of enum values */           \
   /* being contiguous and sorted in the same order! */             \
   T(COMMA, ",", 1)                                                 \
+  T(NULLISH, "??", 3)                                              \
   T(OR, "||", 4)                                                   \
   T(AND, "&&", 5)                                                  \
                                                                    \
@@ -201,7 +203,7 @@ namespace internal {
   T(UNINITIALIZED, nullptr, 0)                                     \
   T(REGEXP_LITERAL, nullptr, 0)
 
-class Token {
+class V8_EXPORT_PRIVATE Token {
  public:
   // All token values.
 #define T(name, string, precedence) name,
@@ -215,8 +217,8 @@ class Token {
     return name_[token];
   }
 
-  class IsKeywordBits : public BitField8<bool, 0, 1> {};
-  class IsPropertyNameBits : public BitField8<bool, IsKeywordBits::kNext, 1> {};
+  using IsKeywordBits = BitField8<bool, 0, 1>;
+  using IsPropertyNameBits = IsKeywordBits::Next<bool, 1>;
 
   // Predicates
   static bool IsKeyword(Value token) {

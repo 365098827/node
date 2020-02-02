@@ -4,10 +4,10 @@
 
 #include "src/builtins/builtins-utils-inl.h"
 #include "src/builtins/builtins.h"
-#include "src/code-factory.h"
-#include "src/conversions.h"
-#include "src/counters.h"
-#include "src/objects-inl.h"
+#include "src/codegen/code-factory.h"
+#include "src/logging/counters.h"
+#include "src/numbers/conversions.h"
+#include "src/objects/objects-inl.h"
 #ifdef V8_INTL_SUPPORT
 #include "src/objects/intl-objects.h"
 #endif
@@ -25,8 +25,8 @@ BUILTIN(NumberPrototypeToExponential) {
   Handle<Object> fraction_digits = args.atOrUndefined(isolate, 1);
 
   // Unwrap the receiver {value}.
-  if (value->IsJSValue()) {
-    value = handle(Handle<JSValue>::cast(value)->value(), isolate);
+  if (value->IsJSPrimitiveWrapper()) {
+    value = handle(Handle<JSPrimitiveWrapper>::cast(value)->value(), isolate);
   }
   if (!value->IsNumber()) {
     THROW_NEW_ERROR_RETURN_FAILURE(
@@ -70,8 +70,8 @@ BUILTIN(NumberPrototypeToFixed) {
   Handle<Object> fraction_digits = args.atOrUndefined(isolate, 1);
 
   // Unwrap the receiver {value}.
-  if (value->IsJSValue()) {
-    value = handle(Handle<JSValue>::cast(value)->value(), isolate);
+  if (value->IsJSPrimitiveWrapper()) {
+    value = handle(Handle<JSPrimitiveWrapper>::cast(value)->value(), isolate);
   }
   if (!value->IsNumber()) {
     THROW_NEW_ERROR_RETURN_FAILURE(
@@ -111,29 +111,30 @@ BUILTIN(NumberPrototypeToFixed) {
 // ES6 section 20.1.3.4 Number.prototype.toLocaleString ( [ r1 [ , r2 ] ] )
 BUILTIN(NumberPrototypeToLocaleString) {
   HandleScope scope(isolate);
+  const char* method = "Number.prototype.toLocaleString";
 
   isolate->CountUsage(v8::Isolate::UseCounterFeature::kNumberToLocaleString);
 
   Handle<Object> value = args.at(0);
 
   // Unwrap the receiver {value}.
-  if (value->IsJSValue()) {
-    value = handle(Handle<JSValue>::cast(value)->value(), isolate);
+  if (value->IsJSPrimitiveWrapper()) {
+    value = handle(Handle<JSPrimitiveWrapper>::cast(value)->value(), isolate);
   }
   // 1. Let x be ? thisNumberValue(this value)
   if (!value->IsNumber()) {
     THROW_NEW_ERROR_RETURN_FAILURE(
-        isolate, NewTypeError(MessageTemplate::kNotGeneric,
-                              isolate->factory()->NewStringFromAsciiChecked(
-                                  "Number.prototype.toLocaleString"),
-                              isolate->factory()->Number_string()));
+        isolate,
+        NewTypeError(MessageTemplate::kNotGeneric,
+                     isolate->factory()->NewStringFromAsciiChecked(method),
+                     isolate->factory()->Number_string()));
   }
 
 #ifdef V8_INTL_SUPPORT
   RETURN_RESULT_OR_FAILURE(
       isolate,
       Intl::NumberToLocaleString(isolate, value, args.atOrUndefined(isolate, 1),
-                                 args.atOrUndefined(isolate, 2)));
+                                 args.atOrUndefined(isolate, 2), method));
 #else
   // Turn the {value} into a String.
   return *isolate->factory()->NumberToString(value);
@@ -147,8 +148,8 @@ BUILTIN(NumberPrototypeToPrecision) {
   Handle<Object> precision = args.atOrUndefined(isolate, 1);
 
   // Unwrap the receiver {value}.
-  if (value->IsJSValue()) {
-    value = handle(Handle<JSValue>::cast(value)->value(), isolate);
+  if (value->IsJSPrimitiveWrapper()) {
+    value = handle(Handle<JSPrimitiveWrapper>::cast(value)->value(), isolate);
   }
   if (!value->IsNumber()) {
     THROW_NEW_ERROR_RETURN_FAILURE(
@@ -192,8 +193,8 @@ BUILTIN(NumberPrototypeToString) {
   Handle<Object> radix = args.atOrUndefined(isolate, 1);
 
   // Unwrap the receiver {value}.
-  if (value->IsJSValue()) {
-    value = handle(Handle<JSValue>::cast(value)->value(), isolate);
+  if (value->IsJSPrimitiveWrapper()) {
+    value = handle(Handle<JSPrimitiveWrapper>::cast(value)->value(), isolate);
   }
   if (!value->IsNumber()) {
     THROW_NEW_ERROR_RETURN_FAILURE(

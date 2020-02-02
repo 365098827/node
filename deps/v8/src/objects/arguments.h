@@ -8,7 +8,7 @@
 #include "src/objects/fixed-array.h"
 #include "src/objects/js-objects.h"
 #include "src/objects/struct.h"
-#include "torque-generated/class-definitions-from-dsl.h"
+#include "torque-generated/field-offsets-tq.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -16,24 +16,25 @@
 namespace v8 {
 namespace internal {
 
-// Superclass for all objects with instance type {JS_ARGUMENTS_TYPE}
-class JSArgumentsObject : public JSObject {
+// Superclass for all objects with instance type {JS_ARGUMENTS_OBJECT_TYPE}
+class JSArgumentsObject
+    : public TorqueGeneratedJSArgumentsObject<JSArgumentsObject, JSObject> {
  public:
   DECL_VERIFIER(JSArgumentsObject)
-  DECL_CAST(JSArgumentsObject)
-  OBJECT_CONSTRUCTORS(JSArgumentsObject, JSObject);
+  TQ_OBJECT_CONSTRUCTORS(JSArgumentsObject)
 };
 
 // Common superclass for JSSloppyArgumentsObject and JSStrictArgumentsObject.
-// Note that the instance type {JS_ARGUMENTS_TYPE} does _not_ guarantee the
-// below layout, the in-object properties might have transitioned to dictionary
-// mode already. Only use the below layout with the specific initial maps.
+// Note that the instance type {JS_ARGUMENTS_OBJECT_TYPE} does _not_ guarantee
+// the below layout, the in-object properties might have transitioned to
+// dictionary mode already. Only use the below layout with the specific initial
+// maps.
 class JSArgumentsObjectWithLength : public JSArgumentsObject {
  public:
   // Layout description.
   DEFINE_FIELD_OFFSET_CONSTANTS(
       JSObject::kHeaderSize,
-      TORQUE_GENERATED_JSARGUMENTS_OBJECT_WITH_LENGTH_FIELDS)
+      TORQUE_GENERATED_JS_ARGUMENTS_OBJECT_WITH_LENGTH_FIELDS)
 
   // Indices of in-object properties.
   static const int kLengthIndex = 0;
@@ -48,14 +49,9 @@ class JSArgumentsObjectWithLength : public JSArgumentsObject {
 // This initial map adds in-object properties for "length" and "callee".
 class JSSloppyArgumentsObject : public JSArgumentsObjectWithLength {
  public:
-// Layout description.
-#define JS_SLOPPY_ARGUMENTS_OBJECT_FIELDS(V) \
-  V(kCalleeOffset, kTaggedSize)              \
-  V(kSize, 0)
-
-  DEFINE_FIELD_OFFSET_CONSTANTS(JSArgumentsObjectWithLength::kSize,
-                                JS_SLOPPY_ARGUMENTS_OBJECT_FIELDS)
-#undef JS_SLOPPY_ARGUMENTS_OBJECT_FIELDS
+  DEFINE_FIELD_OFFSET_CONSTANTS(
+      JSArgumentsObjectWithLength::kSize,
+      TORQUE_GENERATED_JS_SLOPPY_ARGUMENTS_OBJECT_FIELDS)
 
   // Indices of in-object properties.
   static const int kCalleeIndex = kLengthIndex + 1;
@@ -107,8 +103,8 @@ class SloppyArgumentsElements : public FixedArray {
   static const int kArgumentsIndex = 1;
   static const uint32_t kParameterMapStart = 2;
 
-  inline Context context();
-  inline FixedArray arguments();
+  DECL_GETTER(context, Context)
+  DECL_GETTER(arguments, FixedArray)
   inline void set_arguments(FixedArray arguments);
   inline uint32_t parameter_map_length();
   inline Object get_mapped_entry(uint32_t entry);
@@ -130,21 +126,17 @@ class SloppyArgumentsElements : public FixedArray {
 // - the parameter map contains no fast alias mapping (i.e. the hole)
 // - this struct (in the slow backing store) contains an index into the context
 // - all attributes are available as part if the property details
-class AliasedArgumentsEntry : public Struct {
+class AliasedArgumentsEntry
+    : public TorqueGeneratedAliasedArgumentsEntry<AliasedArgumentsEntry,
+                                                  Struct> {
  public:
   inline int aliased_context_slot() const;
   inline void set_aliased_context_slot(int count);
 
-  DECL_CAST(AliasedArgumentsEntry)
-
   // Dispatched behavior.
   DECL_PRINTER(AliasedArgumentsEntry)
-  DECL_VERIFIER(AliasedArgumentsEntry)
 
-  DEFINE_FIELD_OFFSET_CONSTANTS(HeapObject::kHeaderSize,
-                                TORQUE_GENERATED_ALIASED_ARGUMENTS_ENTRY_FIELDS)
-
-  OBJECT_CONSTRUCTORS(AliasedArgumentsEntry, Struct);
+  TQ_OBJECT_CONSTRUCTORS(AliasedArgumentsEntry)
 };
 
 }  // namespace internal

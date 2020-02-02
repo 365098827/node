@@ -30,7 +30,8 @@ USE_PTY = "linux" in sys.platform
 if USE_PTY:
   import pty
 
-BUILD_TARGETS_TEST = ["d8", "cctest", "unittests"]
+BUILD_TARGETS_TEST = ["d8", "cctest", "inspector-test", "unittests",
+                      "wasm_api_tests"]
 BUILD_TARGETS_ALL = ["all"]
 
 # All arches that this script understands.
@@ -43,8 +44,8 @@ MODES = ["release", "debug", "optdebug"]
 # Modes that get built/run when you don't specify any.
 DEFAULT_MODES = ["release", "debug"]
 # Build targets that can be manually specified.
-TARGETS = ["d8", "cctest", "unittests", "v8_fuzzers", "mkgrokdump",
-           "generate-bytecode-expectations", "inspector-test"]
+TARGETS = ["d8", "cctest", "unittests", "v8_fuzzers", "wasm_api_tests", "wee8",
+           "mkgrokdump", "generate-bytecode-expectations", "inspector-test"]
 # Build targets that get built when you don't specify any (and specified tests
 # don't imply any other targets).
 DEFAULT_TARGETS = ["d8"]
@@ -64,13 +65,14 @@ ACTIONS = {
 HELP = """<arch> can be any of: %(arches)s
 <mode> can be any of: %(modes)s
 <target> can be any of:
- - cctest, d8, unittests, v8_fuzzers (build respective binary)
+ - %(targets)s (build respective binary)
  - all (build all binaries)
  - tests (build test binaries)
  - check (build test binaries, run most tests)
  - checkall (build all binaries, run more tests)
 """ % {"arches": " ".join(ARCHES),
-       "modes": " ".join(MODES)}
+       "modes": " ".join(MODES),
+       "targets": ", ".join(TARGETS)}
 
 TESTSUITES_TARGETS = {"benchmarks": "d8",
               "cctest": "cctest",
@@ -84,6 +86,7 @@ TESTSUITES_TARGETS = {"benchmarks": "d8",
               "preparser": "d8",
               "test262": "d8",
               "unittests": "unittests",
+              "wasm-api-tests": "wasm_api_tests",
               "webkit": "d8"}
 
 OUTDIR = "out"

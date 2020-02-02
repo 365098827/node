@@ -32,29 +32,15 @@ namespace array {
     assert(array.elements.map != kCOWMap);
   }
 
-  macro IsJSArray(implicit context: Context)(o: Object): bool {
-    try {
-      const array: JSArray = Cast<JSArray>(o) otherwise NotArray;
-      return true;
-    }
-    label NotArray {
-      return false;
-    }
-  }
-
-  macro LoadElementOrUndefined(a: FixedArray, i: Smi): Object {
-    const e: Object = a.objects[i];
-    return e == Hole ? Undefined : e;
+  macro LoadElementOrUndefined(implicit context:
+                                   Context)(a: FixedArray, i: Smi): JSAny {
+    const e = UnsafeCast<(JSAny | TheHole)>(a.objects[i]);
+    return ReplaceTheHoleWithUndefined(e);
   }
 
   macro LoadElementOrUndefined(a: FixedDoubleArray, i: Smi): NumberOrUndefined {
-    try {
-      const f: float64 = LoadDoubleWithHoleCheck(a, i) otherwise IfHole;
-      return AllocateHeapNumberWithValue(f);
-    }
-    label IfHole {
-      return Undefined;
-    }
+    const f: float64 = LoadDoubleWithHoleCheck(a, i) otherwise return Undefined;
+    return AllocateHeapNumberWithValue(f);
   }
 
   macro StoreArrayHole(elements: FixedDoubleArray, k: Smi): void {
@@ -62,27 +48,8 @@ namespace array {
   }
 
   macro StoreArrayHole(elements: FixedArray, k: Smi): void {
-    elements.objects[k] = Hole;
+    elements.objects[k] = TheHole;
   }
 
-  macro CopyArrayElement(
-      elements: FixedArray, newElements: FixedArray, from: Smi, to: Smi): void {
-    const e: Object = elements.objects[from];
-    newElements.objects[to] = e;
-  }
-
-  macro CopyArrayElement(
-      elements: FixedDoubleArray, newElements: FixedDoubleArray, from: Smi,
-      to: Smi): void {
-    try {
-      const floatValue: float64 = LoadDoubleWithHoleCheck(elements, from)
-          otherwise FoundHole;
-      newElements.floats[to] = floatValue;
-    }
-    label FoundHole {
-      StoreArrayHole(newElements, to);
-    }
-  }
-
-  extern macro SetPropertyLength(implicit context: Context)(Object, Number);
+  extern macro SetPropertyLength(implicit context: Context)(JSAny, Number);
 }

@@ -38,14 +38,6 @@
 
 #include <utility>
 
-#ifdef _WIN32
-/* MAX_PATH is in characters, not bytes. Make sure we have enough headroom. */
-#define CWD_BUFSIZE (MAX_PATH * 4)
-#else
-#include <climits>  // PATH_MAX on Solaris.
-#define CWD_BUFSIZE (PATH_MAX)
-#endif
-
 namespace node {
 
 inline v8::Isolate* IsolateData::isolate() const {
@@ -219,14 +211,6 @@ Environment* Environment::ForAsyncHooks(AsyncHooks* hooks) {
   return ContainerOf(&Environment::async_hooks_, hooks);
 }
 
-inline AsyncCallbackScope::AsyncCallbackScope(Environment* env) : env_(env) {
-  env_->PushAsyncCallbackScope();
-}
-
-inline AsyncCallbackScope::~AsyncCallbackScope() {
-  env_->PopAsyncCallbackScope();
-}
-
 inline size_t Environment::async_callback_scope_depth() const {
   return async_callback_scope_depth_;
 }
@@ -256,14 +240,6 @@ inline uint32_t ImmediateInfo::ref_count() const {
 
 inline bool ImmediateInfo::has_outstanding() const {
   return fields_[kHasOutstanding] == 1;
-}
-
-inline void ImmediateInfo::count_inc(uint32_t increment) {
-  fields_[kCount] += increment;
-}
-
-inline void ImmediateInfo::count_dec(uint32_t decrement) {
-  fields_[kCount] -= decrement;
 }
 
 inline void ImmediateInfo::ref_count_inc(uint32_t increment) {
@@ -473,7 +449,7 @@ inline void Environment::set_printed_error(bool value) {
 }
 
 inline void Environment::set_trace_sync_io(bool value) {
-  options_->trace_sync_io = value;
+  trace_sync_io_ = value;
 }
 
 inline bool Environment::abort_on_uncaught_exception() const {
@@ -559,22 +535,35 @@ inline double Environment::get_default_trigger_async_id() {
 
 inline double* Environment::heap_statistics_buffer() const {
   CHECK_NOT_NULL(heap_statistics_buffer_);
-  return heap_statistics_buffer_;
+  return static_cast<double*>(heap_statistics_buffer_->Data());
 }
 
-inline void Environment::set_heap_statistics_buffer(double* pointer) {
-  CHECK_NULL(heap_statistics_buffer_);  // Should be set only once.
-  heap_statistics_buffer_ = pointer;
+inline void Environment::set_heap_statistics_buffer(
+    std::shared_ptr<v8::BackingStore> backing_store) {
+  CHECK(!heap_statistics_buffer_);  // Should be set only once.
+  heap_statistics_buffer_ = std::move(backing_store);
 }
 
 inline double* Environment::heap_space_statistics_buffer() const {
-  CHECK_NOT_NULL(heap_space_statistics_buffer_);
-  return heap_space_statistics_buffer_;
+  CHECK(heap_space_statistics_buffer_);
+  return static_cast<double*>(heap_space_statistics_buffer_->Data());
 }
 
-inline void Environment::set_heap_space_statistics_buffer(double* pointer) {
-  CHECK_NULL(heap_space_statistics_buffer_);  // Should be set only once.
-  heap_space_statistics_buffer_ = pointer;
+inline void Environment::set_heap_space_statistics_buffer(
+    std::shared_ptr<v8::BackingStore> backing_store) {
+  CHECK(!heap_space_statistics_buffer_);  // Should be set only once.
+  heap_space_statistics_buffer_ = std::move(backing_store);
+}
+
+inline double* Environment::heap_code_statistics_buffer() const {
+  CHECK(heap_code_statistics_buffer_);
+  return static_cast<double*>(heap_code_statistics_buffer_->Data());
+}
+
+inline void Environment::set_heap_code_statistics_buffer(
+    std::shared_ptr<v8::BackingStore> backing_store) {
+  CHECK(!heap_code_statistics_buffer_);  // Should be set only once.
+  heap_code_statistics_buffer_ = std::move(backing_store);
 }
 
 inline char* Environment::http_parser_buffer() const {
@@ -643,6 +632,10 @@ inline const std::vector<std::string>& Environment::exec_argv() {
   return exec_argv_;
 }
 
+inline const std::string& Environment::exec_path() const {
+  return exec_path_;
+}
+
 #if HAVE_INSPECTOR
 inline void Environment::set_coverage_directory(const char* dir) {
   coverage_directory_ = std::string(dir);
@@ -673,20 +666,63 @@ Environment::cpu_profiler_connection() {
   return cpu_profiler_connection_.get();
 }
 
-inline void Environment::set_cpu_profile_path(const std::string& path) {
-  cpu_profile_path_ = path;
+inline void Environment::set_cpu_prof_interval(uint64_t interval) {
+  cpu_prof_interval_ = interval;
 }
 
-inline const std::string& Environment::cpu_profile_path() const {
-  return cpu_profile_path_;
+inline uint64_t Environment::cpu_prof_interval() const {
+  return cpu_prof_interval_;
 }
 
-inline void Environment::set_cpu_prof_dir(const std::string& path) {
-  cpu_prof_dir_ = path;
+inline void Environment::set_cpu_prof_name(const std::string& name) {
+  cpu_prof_name_ = name;
+}
+
+inline const std::string& Environment::cpu_prof_name() const {
+  return cpu_prof_name_;
+}
+
+inline void Environment::set_cpu_prof_dir(const std::string& dir) {
+  cpu_prof_dir_ = dir;
 }
 
 inline const std::string& Environment::cpu_prof_dir() const {
   return cpu_prof_dir_;
+}
+
+inline void Environment::set_heap_profiler_connection(
+    std::unique_ptr<profiler::V8HeapProfilerConnection> connection) {
+  CHECK_NULL(heap_profiler_connection_);
+  std::swap(heap_profiler_connection_, connection);
+}
+
+inline profiler::V8HeapProfilerConnection*
+Environment::heap_profiler_connection() {
+  return heap_profiler_connection_.get();
+}
+
+inline void Environment::set_heap_prof_name(const std::string& name) {
+  heap_prof_name_ = name;
+}
+
+inline const std::string& Environment::heap_prof_name() const {
+  return heap_prof_name_;
+}
+
+inline void Environment::set_heap_prof_dir(const std::string& dir) {
+  heap_prof_dir_ = dir;
+}
+
+inline const std::string& Environment::heap_prof_dir() const {
+  return heap_prof_dir_;
+}
+
+inline void Environment::set_heap_prof_interval(uint64_t interval) {
+  heap_prof_interval_ = interval;
+}
+
+inline uint64_t Environment::heap_prof_interval() const {
+  return heap_prof_interval_;
 }
 
 #endif  // HAVE_INSPECTOR
@@ -704,33 +740,116 @@ inline void IsolateData::set_options(
   options_ = std::move(options);
 }
 
-void Environment::CreateImmediate(native_immediate_callback cb,
-                                  void* data,
-                                  v8::Local<v8::Object> obj,
-                                  bool ref) {
-  native_immediate_callbacks_.push_back({
-    cb,
-    data,
-    v8::Global<v8::Object>(isolate_, obj),
-    ref
-  });
-  immediate_info()->count_inc(1);
+std::unique_ptr<Environment::NativeImmediateCallback>
+Environment::NativeImmediateQueue::Shift() {
+  std::unique_ptr<Environment::NativeImmediateCallback> ret = std::move(head_);
+  if (ret) {
+    head_ = ret->get_next();
+    if (!head_)
+      tail_ = nullptr;  // The queue is now empty.
+  }
+  size_--;
+  return ret;
 }
 
-void Environment::SetImmediate(native_immediate_callback cb,
-                               void* data,
-                               v8::Local<v8::Object> obj) {
-  CreateImmediate(cb, data, obj, true);
+void Environment::NativeImmediateQueue::Push(
+    std::unique_ptr<Environment::NativeImmediateCallback> cb) {
+  NativeImmediateCallback* prev_tail = tail_;
+
+  size_++;
+  tail_ = cb.get();
+  if (prev_tail != nullptr)
+    prev_tail->set_next(std::move(cb));
+  else
+    head_ = std::move(cb);
+}
+
+void Environment::NativeImmediateQueue::ConcatMove(
+    NativeImmediateQueue&& other) {
+  size_ += other.size_;
+  if (tail_ != nullptr)
+    tail_->set_next(std::move(other.head_));
+  else
+    head_ = std::move(other.head_);
+  tail_ = other.tail_;
+  other.tail_ = nullptr;
+  other.size_ = 0;
+}
+
+size_t Environment::NativeImmediateQueue::size() const {
+  return size_.load();
+}
+
+template <typename Fn>
+void Environment::CreateImmediate(Fn&& cb, bool ref) {
+  auto callback = std::make_unique<NativeImmediateCallbackImpl<Fn>>(
+      std::move(cb), ref);
+  native_immediates_.Push(std::move(callback));
+}
+
+template <typename Fn>
+void Environment::SetImmediate(Fn&& cb) {
+  CreateImmediate(std::move(cb), true);
 
   if (immediate_info()->ref_count() == 0)
     ToggleImmediateRef(true);
   immediate_info()->ref_count_inc(1);
 }
 
-void Environment::SetUnrefImmediate(native_immediate_callback cb,
-                                    void* data,
-                                    v8::Local<v8::Object> obj) {
-  CreateImmediate(cb, data, obj, false);
+template <typename Fn>
+void Environment::SetUnrefImmediate(Fn&& cb) {
+  CreateImmediate(std::move(cb), false);
+}
+
+template <typename Fn>
+void Environment::SetImmediateThreadsafe(Fn&& cb) {
+  auto callback = std::make_unique<NativeImmediateCallbackImpl<Fn>>(
+      std::move(cb), false);
+  {
+    Mutex::ScopedLock lock(native_immediates_threadsafe_mutex_);
+    native_immediates_threadsafe_.Push(std::move(callback));
+  }
+  uv_async_send(&task_queues_async_);
+}
+
+template <typename Fn>
+void Environment::RequestInterrupt(Fn&& cb) {
+  auto callback = std::make_unique<NativeImmediateCallbackImpl<Fn>>(
+      std::move(cb), false);
+  {
+    Mutex::ScopedLock lock(native_immediates_threadsafe_mutex_);
+    native_immediates_interrupts_.Push(std::move(callback));
+  }
+  uv_async_send(&task_queues_async_);
+  RequestInterruptFromV8();
+}
+
+Environment::NativeImmediateCallback::NativeImmediateCallback(bool refed)
+  : refed_(refed) {}
+
+bool Environment::NativeImmediateCallback::is_refed() const {
+  return refed_;
+}
+
+std::unique_ptr<Environment::NativeImmediateCallback>
+Environment::NativeImmediateCallback::get_next() {
+  return std::move(next_);
+}
+
+void Environment::NativeImmediateCallback::set_next(
+    std::unique_ptr<NativeImmediateCallback> next) {
+  next_ = std::move(next);
+}
+
+template <typename Fn>
+Environment::NativeImmediateCallbackImpl<Fn>::NativeImmediateCallbackImpl(
+    Fn&& callback, bool refed)
+  : NativeImmediateCallback(refed),
+    callback_(std::move(callback)) {}
+
+template <typename Fn>
+void Environment::NativeImmediateCallbackImpl<Fn>::Call(Environment* env) {
+  callback_(env);
 }
 
 inline bool Environment::can_call_into_js() const {
@@ -790,8 +909,39 @@ inline void Environment::remove_sub_worker_context(worker::Worker* context) {
   sub_worker_contexts_.erase(context);
 }
 
+template <typename Fn>
+inline void Environment::ForEachWorker(Fn&& iterator) {
+  for (worker::Worker* w : sub_worker_contexts_) iterator(w);
+}
+
+inline void Environment::add_refs(int64_t diff) {
+  task_queues_async_refs_ += diff;
+  CHECK_GE(task_queues_async_refs_, 0);
+  if (task_queues_async_refs_ == 0)
+    uv_unref(reinterpret_cast<uv_handle_t*>(&task_queues_async_));
+  else
+    uv_ref(reinterpret_cast<uv_handle_t*>(&task_queues_async_));
+}
+
 inline bool Environment::is_stopping() const {
-  return thread_stopper_.is_stopped();
+  return is_stopping_.load();
+}
+
+inline void Environment::set_stopping(bool value) {
+  is_stopping_.store(value);
+}
+
+inline std::list<node_module>* Environment::extra_linked_bindings() {
+  return &extra_linked_bindings_;
+}
+
+inline node_module* Environment::extra_linked_bindings_head() {
+  return extra_linked_bindings_.size() > 0 ?
+      &extra_linked_bindings_.front() : nullptr;
+}
+
+inline const Mutex& Environment::extra_linked_bindings_mutex() const {
+  return extra_linked_bindings_mutex_;
 }
 
 inline performance::performance_state* Environment::performance_state() {
@@ -901,10 +1051,20 @@ inline v8::MaybeLocal<v8::Object> AllocatedBuffer::ToBuffer() {
 inline v8::Local<v8::ArrayBuffer> AllocatedBuffer::ToArrayBuffer() {
   CHECK_NOT_NULL(env_);
   uv_buf_t buf = release();
+  auto callback = [](void* data, size_t length, void* deleter_data){
+    CHECK_NOT_NULL(deleter_data);
+
+    static_cast<v8::ArrayBuffer::Allocator*>(deleter_data)
+        ->Free(data, length);
+  };
+  std::unique_ptr<v8::BackingStore> backing =
+      v8::ArrayBuffer::NewBackingStore(buf.base,
+                                       buf.len,
+                                       callback,
+                                       env_->isolate()
+                                          ->GetArrayBufferAllocator());
   return v8::ArrayBuffer::New(env_->isolate(),
-                              buf.base,
-                              buf.len,
-                              v8::ArrayBufferCreationMode::kInternalized);
+                              std::move(backing));
 }
 
 inline void Environment::ThrowError(const char* errmsg) {
@@ -1020,6 +1180,21 @@ inline void Environment::SetProtoMethodNoSideEffect(
   t->SetClassName(name_string);  // NODE_SET_PROTOTYPE_METHOD() compatibility.
 }
 
+inline void Environment::SetInstanceMethod(v8::Local<v8::FunctionTemplate> that,
+                                           const char* name,
+                                           v8::FunctionCallback callback) {
+  v8::Local<v8::Signature> signature = v8::Signature::New(isolate(), that);
+  v8::Local<v8::FunctionTemplate> t =
+      NewFunctionTemplate(callback, signature, v8::ConstructorBehavior::kThrow,
+                          v8::SideEffectType::kHasSideEffect);
+  // kInternalized strings are created in the old space.
+  const v8::NewStringType type = v8::NewStringType::kInternalized;
+  v8::Local<v8::String> name_string =
+      v8::String::NewFromUtf8(isolate(), name, type).ToLocalChecked();
+  that->InstanceTemplate()->Set(name_string, t);
+  t->SetClassName(name_string);
+}
+
 void Environment::AddCleanupHook(void (*fn)(void*), void* arg) {
   auto insertion_info = cleanup_hooks_.emplace(CleanupHookCallback {
     fn, arg, cleanup_hook_counter_++
@@ -1031,6 +1206,12 @@ void Environment::AddCleanupHook(void (*fn)(void*), void* arg) {
 void Environment::RemoveCleanupHook(void (*fn)(void*), void* arg) {
   CleanupHookCallback search { fn, arg, 0 };
   cleanup_hooks_.erase(search);
+}
+
+inline void Environment::RegisterFinalizationGroupForCleanup(
+    v8::Local<v8::FinalizationGroup> group) {
+  cleanup_finalization_groups_.emplace_back(isolate(), group);
+  uv_async_send(&task_queues_async_);
 }
 
 size_t CleanupHookCallback::Hash::operator()(
@@ -1059,12 +1240,12 @@ void Environment::ForEachBaseObject(T&& iterator) {
   }
 }
 
-bool AsyncRequest::is_stopped() const {
-  return stopped_.load();
+void Environment::modify_base_object_count(int64_t delta) {
+  base_object_count_ += delta;
 }
 
-void AsyncRequest::set_stopped(bool flag) {
-  stopped_.store(flag);
+int64_t Environment::base_object_count() const {
+  return base_object_count_;
 }
 
 #define VP(PropertyName, StringValue) V(v8::Private, PropertyName)
@@ -1106,10 +1287,13 @@ void AsyncRequest::set_stopped(bool flag) {
   inline void Environment::set_ ## PropertyName(v8::Local<TypeName> value) {  \
     PropertyName ## _.Reset(isolate(), value);                                \
   }
-  ENVIRONMENT_STRONG_PERSISTENT_PROPERTIES(V)
+  ENVIRONMENT_STRONG_PERSISTENT_TEMPLATES(V)
   ENVIRONMENT_STRONG_PERSISTENT_VALUES(V)
 #undef V
 
+  inline v8::Local<v8::Context> Environment::context() const {
+    return PersistentToLocal::Strong(context_);
+  }
 }  // namespace node
 
 #endif  // defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS

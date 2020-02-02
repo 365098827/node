@@ -43,11 +43,12 @@
 #include "src/base/utils/random-number-generator.h"
 
 #ifdef V8_FAST_TLS_SUPPORTED
-#include "src/base/atomicops.h"
+#include <atomic>
 #endif
 
 #if V8_OS_MACOSX
 #include <dlfcn.h>
+#include <mach/mach.h>
 #endif
 
 #if V8_OS_LINUX
@@ -137,10 +138,10 @@ int GetFlagsForMemoryPermission(OS::MemoryPermission access) {
   return flags;
 }
 
-void* Allocate(void* address, size_t size, OS::MemoryPermission access) {
+void* Allocate(void* hint, size_t size, OS::MemoryPermission access) {
   int prot = GetProtectionFromMemoryPermission(access);
   int flags = GetFlagsForMemoryPermission(access);
-  void* result = mmap(address, size, prot, flags, kMmapFd, kMmapFdOffset);
+  void* result = mmap(hint, size, prot, flags, kMmapFd, kMmapFdOffset);
   if (result == MAP_FAILED) return nullptr;
   return result;
 }
@@ -199,6 +200,12 @@ void* OS::GetRandomMmapAddr() {
     MutexGuard guard(rng_mutex.Pointer());
     GetPlatformRandomNumberGenerator()->NextBytes(&raw_addr, sizeof(raw_addr));
   }
+#if defined(__APPLE__)
+#if V8_TARGET_ARCH_ARM64
+  DCHECK_EQ(1 << 14, AllocatePageSize());
+  raw_addr = RoundDown(raw_addr, 1 << 14);
+#endif
+#endif
 #if defined(V8_USE_ADDRESS_SANITIZER) || defined(MEMORY_SANITIZER) || \
     defined(THREAD_SANITIZER) || defined(LEAK_SANITIZER)
   // If random hint addresses interfere with address ranges hard coded in
@@ -272,16 +279,16 @@ void* OS::GetRandomMmapAddr() {
 // TODO(bbudge) Move Cygwin and Fuchsia stuff into platform-specific files.
 #if !V8_OS_CYGWIN && !V8_OS_FUCHSIA
 // static
-void* OS::Allocate(void* address, size_t size, size_t alignment,
+void* OS::Allocate(void* hint, size_t size, size_t alignment,
                    MemoryPermission access) {
   size_t page_size = AllocatePageSize();
   DCHECK_EQ(0, size % page_size);
   DCHECK_EQ(0, alignment % page_size);
-  address = AlignedAddress(address, alignment);
+  hint = AlignedAddress(hint, alignment);
   // Add the maximum misalignment so we are guaranteed an aligned base address.
   size_t request_size = size + (alignment - page_size);
   request_size = RoundUp(request_size, OS::AllocatePageSize());
-  void* result = base::Allocate(address, request_size, access);
+  void* result = base::Allocate(hint, request_size, access);
   if (result == nullptr) return nullptr;
 
   // Unmap memory allocated before the aligned base address.
@@ -444,15 +451,22 @@ class PosixMemoryMappedFile final : public OS::MemoryMappedFile {
 
 
 // static
-OS::MemoryMappedFile* OS::MemoryMappedFile::open(const char* name) {
-  if (FILE* file = fopen(name, "r+")) {
+OS::MemoryMappedFile* OS::MemoryMappedFile::open(const char* name,
+                                                 FileMode mode) {
+  const char* fopen_mode = (mode == FileMode::kReadOnly) ? "r" : "r+";
+  if (FILE* file = fopen(name, fopen_mode)) {
     if (fseek(file, 0, SEEK_END) == 0) {
       long size = ftell(file);  // NOLINT(runtime/int)
       if (size == 0) return new PosixMemoryMappedFile(file, nullptr, 0);
       if (size > 0) {
+        int prot = PROT_READ;
+        int flags = MAP_PRIVATE;
+        if (mode == FileMode::kReadWrite) {
+          prot |= PROT_WRITE;
+          flags = MAP_SHARED;
+        }
         void* const memory =
-            mmap(OS::GetRandomMmapAddr(), size, PROT_READ | PROT_WRITE,
-                 MAP_SHARED, fileno(file), 0);
+            mmap(OS::GetRandomMmapAddr(), size, prot, flags, fileno(file), 0);
         if (memory != MAP_FAILED) {
           return new PosixMemoryMappedFile(file, memory, size);
         }
@@ -462,7 +476,6 @@ OS::MemoryMappedFile* OS::MemoryMappedFile::open(const char* name) {
   }
   return nullptr;
 }
-
 
 // static
 OS::MemoryMappedFile* OS::MemoryMappedFile::create(const char* name,
@@ -672,11 +685,6 @@ int OS::VSNPrintF(char* str,
 // POSIX string support.
 //
 
-char* OS::StrChr(char* str, int c) {
-  return strchr(str, c);
-}
-
-
 void OS::StrNCpy(char* dest, int length, const char* src, size_t n) {
   strncpy(dest, src, n);
 }
@@ -754,13 +762,12 @@ void Thread::set_name(const char* name) {
   name_[sizeof(name_) - 1] = '\0';
 }
 
-
-void Thread::Start() {
+bool Thread::Start() {
   int result;
   pthread_attr_t attr;
   memset(&attr, 0, sizeof(attr));
   result = pthread_attr_init(&attr);
-  DCHECK_EQ(0, result);
+  if (result != 0) return false;
   size_t stack_size = stack_size_;
   if (stack_size == 0) {
 #if V8_OS_MACOSX
@@ -773,17 +780,17 @@ void Thread::Start() {
   }
   if (stack_size > 0) {
     result = pthread_attr_setstacksize(&attr, stack_size);
-    DCHECK_EQ(0, result);
+    if (result != 0) return pthread_attr_destroy(&attr), false;
   }
   {
     MutexGuard lock_guard(&data_->thread_creation_mutex_);
     result = pthread_create(&data_->thread_, &attr, ThreadEntry, this);
+    if (result != 0 || data_->thread_ == kNoThread) {
+      return pthread_attr_destroy(&attr), false;
+    }
   }
-  DCHECK_EQ(0, result);
   result = pthread_attr_destroy(&attr);
-  DCHECK_EQ(0, result);
-  DCHECK_NE(data_->thread_, kNoThread);
-  USE(result);
+  return result == 0;
 }
 
 void Thread::Join() { pthread_join(data_->thread_, nullptr); }
@@ -815,7 +822,7 @@ static pthread_key_t LocalKeyToPthreadKey(Thread::LocalStorageKey local_key) {
 
 #ifdef V8_FAST_TLS_SUPPORTED
 
-static Atomic32 tls_base_offset_initialized = 0;
+static std::atomic<bool> tls_base_offset_initialized{false};
 intptr_t kMacTlsBaseOffset = 0;
 
 // It's safe to do the initialization more that once, but it has to be
@@ -851,7 +858,7 @@ static void InitializeTlsBaseOffset() {
     kMacTlsBaseOffset = 0;
   }
 
-  Release_Store(&tls_base_offset_initialized, 1);
+  tls_base_offset_initialized.store(true, std::memory_order_release);
 }
 
 
@@ -871,7 +878,7 @@ static void CheckFastTls(Thread::LocalStorageKey key) {
 Thread::LocalStorageKey Thread::CreateThreadLocalKey() {
 #ifdef V8_FAST_TLS_SUPPORTED
   bool check_fast_tls = false;
-  if (tls_base_offset_initialized == 0) {
+  if (!tls_base_offset_initialized.load(std::memory_order_acquire)) {
     check_fast_tls = true;
     InitializeTlsBaseOffset();
   }

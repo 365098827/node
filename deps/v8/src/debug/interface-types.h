@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "include/v8.h"
-#include "src/globals.h"
+#include "src/common/globals.h"
 
 namespace v8 {
 
@@ -129,7 +129,7 @@ class ConsoleCallArguments : private v8::FunctionCallbackInfo<v8::Value> {
   }
 
   explicit ConsoleCallArguments(const v8::FunctionCallbackInfo<v8::Value>&);
-  explicit ConsoleCallArguments(internal::BuiltinArguments&);
+  explicit ConsoleCallArguments(const internal::BuiltinArguments&);
 };
 
 class ConsoleContext {
@@ -194,7 +194,7 @@ class ConsoleDelegate {
   virtual ~ConsoleDelegate() = default;
 };
 
-typedef int BreakpointId;
+using BreakpointId = int;
 
 }  // namespace debug
 }  // namespace v8

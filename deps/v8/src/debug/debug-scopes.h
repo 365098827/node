@@ -8,11 +8,11 @@
 #include <vector>
 
 #include "src/debug/debug-frames.h"
-#include "src/frames.h"
 
 namespace v8 {
 namespace internal {
 
+class JavaScriptFrame;
 class ParseInfo;
 
 // Iterate over the actual scopes visible from a stack frame or from a closure.
@@ -41,7 +41,7 @@ class ScopeIterator {
   static const int kScopeDetailsFunctionIndex = 5;
   static const int kScopeDetailsSize = 6;
 
-  enum Option { DEFAULT, IGNORE_NESTED_SCOPES, COLLECT_NON_LOCALS };
+  enum Option { DEFAULT, COLLECT_NON_LOCALS };
 
   ScopeIterator(Isolate* isolate, FrameInspector* frame_inspector,
                 Option options = DEFAULT);
@@ -77,8 +77,10 @@ class ScopeIterator {
   // Set variable value and return true on success.
   bool SetVariableValue(Handle<String> variable_name, Handle<Object> new_value);
 
+  bool ClosureScopeHasThisReference() const;
+
   // Populate the set with collected non-local variable names.
-  Handle<StringSet> GetNonLocals();
+  Handle<StringSet> GetLocals() { return locals_; }
 
   // Similar to JSFunction::GetName return the function's name or it's inferred
   // name.
@@ -110,7 +112,7 @@ class ScopeIterator {
   Handle<JSFunction> function_;
   Handle<Context> context_;
   Handle<Script> script_;
-  Handle<StringSet> non_locals_;
+  Handle<StringSet> locals_;
   DeclarationScope* closure_scope_ = nullptr;
   Scope* start_scope_ = nullptr;
   Scope* current_scope_ = nullptr;
@@ -120,16 +122,19 @@ class ScopeIterator {
     return frame_inspector_->javascript_frame();
   }
 
+  void AdvanceOneScope();
+  void AdvanceToNonHiddenScope();
+  void AdvanceContext();
+  void CollectLocalsFromCurrentScope();
+
   int GetSourcePosition();
 
   void TryParseAndRetrieveScopes(ScopeIterator::Option option);
 
-  void RetrieveScopeChain(DeclarationScope* scope);
-
   void UnwrapEvaluationContext();
 
-  typedef std::function<bool(Handle<String> name, Handle<Object> value)>
-      Visitor;
+  using Visitor =
+      std::function<bool(Handle<String> name, Handle<Object> value)>;
 
   Handle<JSObject> WithContextExtension();
 

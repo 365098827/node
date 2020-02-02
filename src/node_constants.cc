@@ -19,8 +19,10 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+#include "env-inl.h"
 #include "node_constants.h"
 #include "node_internals.h"
+#include "util-inl.h"
 
 #include "zlib.h"
 
@@ -1124,6 +1126,8 @@ void DefineSystemConstants(Local<Object> target) {
 #ifdef O_EXCL
   NODE_DEFINE_CONSTANT(target, O_EXCL);
 #endif
+
+NODE_DEFINE_CONSTANT(target, UV_FS_O_FILEMAP);
 
 #ifdef O_NOCTTY
   NODE_DEFINE_CONSTANT(target, O_NOCTTY);

@@ -5,13 +5,11 @@
 #ifndef V8_BUILTINS_GROWABLE_FIXED_ARRAY_GEN_H_
 #define V8_BUILTINS_GROWABLE_FIXED_ARRAY_GEN_H_
 
-#include "src/code-stub-assembler.h"
+#include "src/codegen/code-stub-assembler.h"
 
 namespace v8 {
 namespace internal {
 
-template <class T>
-using TNode = compiler::TNode<T>;
 
 // Utility class implementing a growable fixed array through CSA.
 class GrowableFixedArray : public CodeStubAssembler {

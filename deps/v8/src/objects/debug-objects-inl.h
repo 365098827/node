@@ -8,8 +8,8 @@
 #include "src/objects/debug-objects.h"
 
 #include "src/heap/heap-write-barrier-inl.h"
-#include "src/objects-inl.h"
 #include "src/objects/code-inl.h"
+#include "src/objects/objects-inl.h"
 #include "src/objects/shared-function-info.h"
 
 // Has to be the last include (doesn't have include guards):
@@ -21,24 +21,16 @@ namespace internal {
 OBJECT_CONSTRUCTORS_IMPL(BreakPoint, Tuple2)
 OBJECT_CONSTRUCTORS_IMPL(BreakPointInfo, Tuple2)
 OBJECT_CONSTRUCTORS_IMPL(CoverageInfo, FixedArray)
-OBJECT_CONSTRUCTORS_IMPL(DebugInfo, Struct)
+TQ_OBJECT_CONSTRUCTORS_IMPL(DebugInfo)
 
 NEVER_READ_ONLY_SPACE_IMPL(DebugInfo)
 
 CAST_ACCESSOR(BreakPointInfo)
-CAST_ACCESSOR(DebugInfo)
 CAST_ACCESSOR(CoverageInfo)
 CAST_ACCESSOR(BreakPoint)
 
-SMI_ACCESSORS(DebugInfo, flags, kFlagsOffset)
-ACCESSORS(DebugInfo, shared, SharedFunctionInfo, kSharedFunctionInfoOffset)
-SMI_ACCESSORS(DebugInfo, debugger_hints, kDebuggerHintsOffset)
-ACCESSORS(DebugInfo, script, Object, kScriptOffset)
-ACCESSORS(DebugInfo, original_bytecode_array, Object,
-          kOriginalBytecodeArrayOffset)
-ACCESSORS(DebugInfo, debug_bytecode_array, Object, kDebugBytecodeArrayOffset)
-ACCESSORS(DebugInfo, break_points, FixedArray, kBreakPointsStateOffset)
-ACCESSORS(DebugInfo, coverage_info, Object, kCoverageInfoOffset)
+TQ_SMI_ACCESSORS(DebugInfo, flags)
+TQ_SMI_ACCESSORS(DebugInfo, debugger_hints)
 
 BIT_FIELD_ACCESSORS(DebugInfo, debugger_hints, side_effect_state,
                     DebugInfo::SideEffectStateBits)
@@ -56,9 +48,9 @@ SMI_ACCESSORS(BreakPoint, id, kIdOffset)
 ACCESSORS(BreakPoint, condition, String, kConditionOffset)
 
 bool DebugInfo::HasInstrumentedBytecodeArray() {
-  DCHECK_EQ(debug_bytecode_array()->IsBytecodeArray(),
-            original_bytecode_array()->IsBytecodeArray());
-  return debug_bytecode_array()->IsBytecodeArray();
+  DCHECK_EQ(debug_bytecode_array().IsBytecodeArray(),
+            original_bytecode_array().IsBytecodeArray());
+  return debug_bytecode_array().IsBytecodeArray();
 }
 
 BytecodeArray DebugInfo::OriginalBytecodeArray() {
@@ -68,7 +60,7 @@ BytecodeArray DebugInfo::OriginalBytecodeArray() {
 
 BytecodeArray DebugInfo::DebugBytecodeArray() {
   DCHECK(HasInstrumentedBytecodeArray());
-  DCHECK_EQ(shared()->GetDebugBytecodeArray(), debug_bytecode_array());
+  DCHECK_EQ(shared().GetDebugBytecodeArray(), debug_bytecode_array());
   return BytecodeArray::cast(debug_bytecode_array());
 }
 

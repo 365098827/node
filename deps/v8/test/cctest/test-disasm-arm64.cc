@@ -28,13 +28,13 @@
 #include <stdio.h>
 #include <cstring>
 
-#include "src/arm64/assembler-arm64.h"
-#include "src/arm64/decoder-arm64-inl.h"
-#include "src/arm64/disasm-arm64.h"
-#include "src/arm64/utils-arm64.h"
-#include "src/frames-inl.h"
-#include "src/macro-assembler-inl.h"
-#include "src/v8.h"
+#include "src/codegen/arm64/assembler-arm64.h"
+#include "src/codegen/arm64/decoder-arm64-inl.h"
+#include "src/codegen/arm64/utils-arm64.h"
+#include "src/codegen/macro-assembler-inl.h"
+#include "src/diagnostics/arm64/disasm-arm64.h"
+#include "src/execution/frames-inl.h"
+#include "src/init/v8.h"
 #include "test/cctest/cctest.h"
 
 namespace v8 {
@@ -854,7 +854,7 @@ TEST_(branch) {
   COMPARE(br(x0), "br x0");
   COMPARE(blr(x1), "blr x1");
   COMPARE(ret(x2), "ret x2");
-  COMPARE(ret(lr), "ret")
+  COMPARE(ret(lr), "ret");
 
   CLEANUP();
 }
@@ -1881,6 +1881,16 @@ TEST_(system_nop) {
   CLEANUP();
 }
 
+TEST(system_pauth) {
+  SET_UP_ASM();
+
+  COMPARE(pacia1716(), "pacia1716");
+  COMPARE(paciasp(), "paciasp");
+  COMPARE(autia1716(), "autia1716");
+  COMPARE(autiasp(), "autiasp");
+
+  CLEANUP();
+}
 
 TEST_(debug) {
   InitializeVM();

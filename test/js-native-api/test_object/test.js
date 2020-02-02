@@ -202,3 +202,58 @@ assert.strictEqual(newObject.test_string, 'test string');
   assert.strictEqual(test_object.Delete(obj, 'foo'), true);
   assert.strictEqual(obj.foo, 'baz');
 }
+
+{
+  // Verify that napi_get_property_names gets the right set of property names,
+  // i.e.: includes prototypes, only enumerable properties, skips symbols,
+  // and includes indices and converts them to strings.
+
+  const object = Object.create({
+    inherited: 1
+  });
+
+  const fooSymbol = Symbol('foo');
+
+  object.normal = 2;
+  object[fooSymbol] = 3;
+  Object.defineProperty(object, 'unenumerable', {
+    value: 4,
+    enumerable: false,
+    writable: true,
+    configurable: true
+  });
+  object[5] = 5;
+
+  assert.deepStrictEqual(test_object.GetPropertyNames(object),
+                         ['5', 'normal', 'inherited']);
+
+  assert.deepStrictEqual(test_object.GetSymbolNames(object),
+                         [fooSymbol]);
+}
+
+// Verify that passing NULL to napi_set_property() results in the correct
+// error.
+assert.deepStrictEqual(test_object.TestSetProperty(), {
+  envIsNull: 'Invalid argument',
+  objectIsNull: 'Invalid argument',
+  keyIsNull: 'Invalid argument',
+  valueIsNull: 'Invalid argument'
+});
+
+// Verify that passing NULL to napi_has_property() results in the correct
+// error.
+assert.deepStrictEqual(test_object.TestHasProperty(), {
+  envIsNull: 'Invalid argument',
+  objectIsNull: 'Invalid argument',
+  keyIsNull: 'Invalid argument',
+  resultIsNull: 'Invalid argument'
+});
+
+// Verify that passing NULL to napi_get_property() results in the correct
+// error.
+assert.deepStrictEqual(test_object.TestGetProperty(), {
+  envIsNull: 'Invalid argument',
+  objectIsNull: 'Invalid argument',
+  keyIsNull: 'Invalid argument',
+  resultIsNull: 'Invalid argument'
+});

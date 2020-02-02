@@ -7,6 +7,8 @@
 
 #include "src/torque/declarable.h"
 #include "src/torque/global-context.h"
+#include "src/torque/type-inference.h"
+#include "src/torque/type-visitor.h"
 
 namespace v8 {
 namespace internal {
@@ -57,45 +59,38 @@ std::ostream& operator<<(std::ostream& os, const RuntimeFunction& b) {
 std::ostream& operator<<(std::ostream& os, const Generic& g) {
   os << "generic " << g.name() << "<";
   PrintCommaSeparatedList(
-      os, g.declaration()->generic_parameters,
+      os, g.generic_parameters(),
       [](const Identifier* identifier) { return identifier->value; });
   os << ">";
 
   return os;
 }
 
-base::Optional<const Type*> Generic::InferTypeArgument(
-    size_t i, const TypeVector& arguments) {
-  const std::string type_name = declaration()->generic_parameters[i]->value;
-  const std::vector<TypeExpression*>& parameters =
-      declaration()->callable->signature->parameters.types;
-  size_t j = declaration()->callable->signature->parameters.implicit_count;
-  for (size_t i = 0; i < arguments.size() && j < parameters.size(); ++i, ++j) {
-    BasicTypeExpression* basic =
-        BasicTypeExpression::DynamicCast(parameters[j]);
-    if (basic && basic->namespace_qualification.empty() &&
-        !basic->is_constexpr && basic->name == type_name) {
-      return arguments[i];
-    }
-  }
-  return base::nullopt;
-}
-
-base::Optional<TypeVector> Generic::InferSpecializationTypes(
+TypeArgumentInference Generic::InferSpecializationTypes(
     const TypeVector& explicit_specialization_types,
     const TypeVector& arguments) {
-  TypeVector result = explicit_specialization_types;
-  size_t type_parameter_count = declaration()->generic_parameters.size();
-  if (explicit_specialization_types.size() > type_parameter_count) {
+  size_t implicit_count = declaration()->parameters.implicit_count;
+  const std::vector<TypeExpression*>& parameters =
+      declaration()->parameters.types;
+  std::vector<TypeExpression*> explicit_parameters(
+      parameters.begin() + implicit_count, parameters.end());
+
+  CurrentScope::Scope generic_scope(ParentScope());
+  TypeArgumentInference inference(generic_parameters(),
+                                  explicit_specialization_types,
+                                  explicit_parameters, arguments);
+  return inference;
+}
+
+base::Optional<Statement*> Generic::CallableBody() {
+  if (auto* decl = TorqueMacroDeclaration::DynamicCast(declaration())) {
+    return decl->body;
+  } else if (auto* decl =
+                 TorqueBuiltinDeclaration::DynamicCast(declaration())) {
+    return decl->body;
+  } else {
     return base::nullopt;
   }
-  for (size_t i = explicit_specialization_types.size();
-       i < type_parameter_count; ++i) {
-    base::Optional<const Type*> inferred = InferTypeArgument(i, arguments);
-    if (!inferred) return base::nullopt;
-    result.push_back(*inferred);
-  }
-  return result;
 }
 
 bool Namespace::IsDefaultNamespace() const {
@@ -103,6 +98,22 @@ bool Namespace::IsDefaultNamespace() const {
 }
 
 bool Namespace::IsTestNamespace() const { return name() == kTestNamespaceName; }
+
+const Type* TypeAlias::Resolve() const {
+  if (!type_) {
+    CurrentScope::Scope scope_activator(ParentScope());
+    CurrentSourcePosition::Scope position_activator(Position());
+    TypeDeclaration* decl = *delayed_;
+    if (being_resolved_) {
+      std::stringstream s;
+      s << "Cannot create type " << decl->name->value
+        << " due to circular dependencies.";
+      ReportError(s.str());
+    }
+    type_ = TypeVisitor::ComputeType(decl);
+  }
+  return *type_;
+}
 
 }  // namespace torque
 }  // namespace internal

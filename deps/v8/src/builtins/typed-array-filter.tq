@@ -10,7 +10,7 @@ namespace typed_array_filter {
 
   // https://tc39.github.io/ecma262/#sec-%typedarray%.prototype.filter
   transitioning javascript builtin TypedArrayPrototypeFilter(
-      context: Context, receiver: Object, ...arguments): Object {
+      js-implicit context: Context, receiver: JSAny)(...arguments): JSAny {
     // arguments[0] = callback
     // arguments[1] = thisArg
     try {
@@ -21,14 +21,15 @@ namespace typed_array_filter {
       const src = typed_array::EnsureAttached(array) otherwise IsDetached;
 
       // 3. Let len be O.[[ArrayLength]].
-      const len: Smi = src.length;
+      // TODO(v8:4153): Support huge TypedArrays here.
+      const len = Cast<Smi>(Convert<Number>(src.length)) otherwise unreachable;
 
       // 4. If IsCallable(callbackfn) is false, throw a TypeError exception.
       const callbackfn = Cast<Callable>(arguments[0])
           otherwise ThrowTypeError(kCalledNonCallable, arguments[0]);
 
       // 5. If thisArg is present, let T be thisArg; else let T be undefined.
-      const thisArg: Object = arguments[1];
+      const thisArg: JSAny = arguments[1];
 
       // 6. Let kept be a new empty List.
       let kept = growable_fixed_array::NewGrowableFixedArray();
@@ -42,23 +43,23 @@ namespace typed_array_filter {
 
         // a. Let Pk be ! ToString(k).
         // b. Let kValue be ? Get(O, Pk).
-        const value: Object = witness.Load(k);
+        const value: JSAny = witness.Load(k);
 
         // c. Let selected be ToBoolean(? Call(callbackfn, T, « kValue, k, O
         // »)).
-        const selected: Object =
+        const selected: JSAny =
             Call(context, callbackfn, thisArg, value, k, witness.GetStable());
 
         // d. If selected is true, then
         //    i. Append kValue to the end of kept.
         //   ii. Increase captured by 1.
-        if (BranchIfToBooleanIsTrue(selected)) kept.Push(value);
+        if (ToBoolean(selected)) kept.Push(value);
 
         // e.Increase k by 1.
       }
 
       // 10. Let A be ? TypedArraySpeciesCreate(O, captured).
-      const lengthSmi: Smi = Convert<Smi>(kept.length);
+      const lengthSmi = Convert<PositiveSmi>(kept.length);
       const typedArray: JSTypedArray =
           typed_array_createtypedarray::TypedArraySpeciesCreateByLength(
               kBuiltinName, array, lengthSmi);

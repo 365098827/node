@@ -5,17 +5,19 @@
 #ifndef V8_HEAP_CONCURRENT_MARKING_H_
 #define V8_HEAP_CONCURRENT_MARKING_H_
 
+#include <memory>
+
 #include "include/v8-platform.h"
-#include "src/allocation.h"
 #include "src/base/atomic-utils.h"
 #include "src/base/platform/condition-variable.h"
 #include "src/base/platform/mutex.h"
-#include "src/cancelable-task.h"
 #include "src/heap/slot-set.h"
 #include "src/heap/spaces.h"
 #include "src/heap/worklist.h"
-#include "src/utils.h"
-#include "src/v8.h"
+#include "src/init/v8.h"
+#include "src/tasks/cancelable-task.h"
+#include "src/utils/allocation.h"
+#include "src/utils/utils.h"
 
 namespace v8 {
 namespace internal {
@@ -33,7 +35,7 @@ struct MemoryChunkData {
 using MemoryChunkDataMap =
     std::unordered_map<MemoryChunk*, MemoryChunkData, MemoryChunk::Hasher>;
 
-class ConcurrentMarking {
+class V8_EXPORT_PRIVATE ConcurrentMarking {
  public:
   // When the scope is entered, the concurrent marking tasks
   // are preempted and are not looking at the heap objects, concurrent marking
@@ -86,8 +88,6 @@ class ConcurrentMarking {
   // scavenge and is going to be re-used.
   void ClearMemoryChunkData(MemoryChunk* chunk);
 
-  int TaskCount() { return task_count_; }
-
   // Checks if all threads are stopped.
   bool IsStopped();
 
@@ -124,7 +124,7 @@ class ConcurrentMarking {
   int pending_task_count_ = 0;
   bool is_pending_[kMaxTasks + 1] = {};
   CancelableTaskManager::Id cancelable_id_[kMaxTasks + 1] = {};
-  int task_count_ = 0;
+  int total_task_count_ = 0;
 };
 
 }  // namespace internal

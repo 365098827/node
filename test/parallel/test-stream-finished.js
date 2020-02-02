@@ -3,6 +3,7 @@
 const common = require('../common');
 const { Writable, Readable, Transform, finished } = require('stream');
 const assert = require('assert');
+const EE = require('events');
 const fs = require('fs');
 const { promisify } = require('util');
 
@@ -174,4 +175,30 @@ const { promisify } = require('util');
   rs.emit('close');
   rs.push(null);
   rs.resume();
+}
+
+{
+  const streamLike = new EE();
+  streamLike.readableEnded = true;
+  streamLike.readable = true;
+  finished(streamLike, common.mustCall);
+  streamLike.emit('close');
+}
+
+{
+  const writable = new Writable({ write() {} });
+  writable.writable = false;
+  writable.destroy();
+  finished(writable, common.mustCall((err) => {
+    assert.strictEqual(err.code, 'ERR_STREAM_PREMATURE_CLOSE');
+  }));
+}
+
+{
+  const readable = new Readable();
+  readable.readable = false;
+  readable.destroy();
+  finished(readable, common.mustCall((err) => {
+    assert.strictEqual(err.code, 'ERR_STREAM_PREMATURE_CLOSE');
+  }));
 }

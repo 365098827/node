@@ -27,16 +27,16 @@
 
 #include <stdlib.h>
 
-#include "src/v8.h"
+#include "src/init/v8.h"
 
-#include "src/code-factory.h"
+#include "src/codegen/code-factory.h"
+#include "src/codegen/macro-assembler.h"
 #include "src/debug/debug.h"
-#include "src/disasm.h"
-#include "src/disassembler.h"
-#include "src/frames-inl.h"
-#include "src/macro-assembler.h"
-#include "src/objects-inl.h"
-#include "src/ostreams.h"
+#include "src/diagnostics/disasm.h"
+#include "src/diagnostics/disassembler.h"
+#include "src/execution/frames-inl.h"
+#include "src/utils/ostreams.h"
+#include "src/objects/objects-inl.h"
 #include "test/cctest/cctest.h"
 
 namespace v8 {
@@ -181,6 +181,8 @@ TEST(DisasmX64) {
   __ decb(Operand(rbx, rcx, times_4, 10000));
   __ decq(rdx);
   __ cdq();
+
+  __ repstosq();
 
   __ nop();
   __ idivq(rdx);
@@ -395,6 +397,8 @@ TEST(DisasmX64) {
     // logic operation
     __ andps(xmm0, xmm1);
     __ andps(xmm0, Operand(rbx, rcx, times_4, 10000));
+    __ andnps(xmm0, xmm1);
+    __ andnps(xmm0, Operand(rbx, rcx, times_4, 10000));
     __ orps(xmm0, xmm1);
     __ orps(xmm0, Operand(rbx, rcx, times_4, 10000));
     __ xorps(xmm0, xmm1);
@@ -515,6 +519,8 @@ TEST(DisasmX64) {
       __ haddps(xmm1, xmm0);
       __ haddps(xmm1, Operand(rbx, rcx, times_4, 10000));
       __ lddqu(xmm1, Operand(rdx, 4));
+      __ movddup(xmm1, Operand(rax, 5));
+      __ movddup(xmm1, xmm2);
     }
   }
 
@@ -540,8 +546,11 @@ TEST(DisasmX64) {
       __ pinsrw(xmm2, rcx, 1);
       __ pextrd(rbx, xmm15, 0);
       __ pextrd(r12, xmm0, 1);
+      __ pextrq(r12, xmm0, 1);
       __ pinsrd(xmm9, r9, 0);
       __ pinsrd(xmm5, Operand(rax, 4), 1);
+      __ pinsrq(xmm9, r9, 0);
+      __ pinsrq(xmm5, Operand(rax, 4), 1);
       __ pblendw(xmm5, xmm1, 1);
       __ pblendw(xmm9, Operand(rax, 4), 1);
 
@@ -599,6 +608,14 @@ TEST(DisasmX64) {
       __ cvtdq2ps(xmm5, Operand(rdx, 4));
 
       SSE4_INSTRUCTION_LIST(EMIT_SSE34_INSTR)
+    }
+  }
+
+  {
+    if (CpuFeatures::IsSupported(SSE4_2)) {
+      CpuFeatureScope scope(&assm, SSE4_2);
+
+      SSE4_2_INSTRUCTION_LIST(EMIT_SSE34_INSTR)
     }
   }
 #undef EMIT_SSE34_INSTR
@@ -684,6 +701,8 @@ TEST(DisasmX64) {
 
       __ vandps(xmm0, xmm9, xmm2);
       __ vandps(xmm9, xmm1, Operand(rbx, rcx, times_4, 10000));
+      __ vandnps(xmm0, xmm9, xmm2);
+      __ vandnps(xmm9, xmm1, Operand(rbx, rcx, times_4, 10000));
       __ vxorps(xmm0, xmm1, xmm9);
       __ vxorps(xmm0, xmm1, Operand(rbx, rcx, times_4, 10000));
       __ vhaddps(xmm0, xmm1, xmm9);
@@ -960,13 +979,14 @@ TEST(DisasmX64) {
     __ Nop(i);
   }
 
+  __ mfence();
+  __ lfence();
   __ pause();
   __ ret(0);
 
   CodeDesc desc;
   assm.GetCode(isolate, &desc);
-  Handle<Code> code =
-      isolate->factory()->NewCode(desc, Code::STUB, Handle<Code>());
+  Handle<Code> code = Factory::CodeBuilder(isolate, desc, Code::STUB).Build();
   USE(code);
 #ifdef OBJECT_PRINT
   StdoutStream os;

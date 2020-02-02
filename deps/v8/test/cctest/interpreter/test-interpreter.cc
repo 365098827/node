@@ -4,22 +4,22 @@
 
 #include <tuple>
 
-#include "src/v8.h"
+#include "src/init/v8.h"
 
-#include "src/api-inl.h"
+#include "src/api/api-inl.h"
 #include "src/base/overflowing-math.h"
-#include "src/compiler.h"
-#include "src/execution.h"
-#include "src/handles.h"
-#include "src/hash-seed-inl.h"
+#include "src/codegen/compiler.h"
+#include "src/execution/execution.h"
+#include "src/handles/handles.h"
 #include "src/heap/heap-inl.h"
 #include "src/interpreter/bytecode-array-builder.h"
 #include "src/interpreter/bytecode-array-iterator.h"
 #include "src/interpreter/bytecode-flags.h"
 #include "src/interpreter/bytecode-label.h"
 #include "src/interpreter/interpreter.h"
-#include "src/objects-inl.h"
+#include "src/numbers/hash-seed-inl.h"
 #include "src/objects/heap-number-inl.h"
+#include "src/objects/objects-inl.h"
 #include "src/objects/smi.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/interpreter/interpreter-tester.h"
@@ -176,7 +176,7 @@ TEST(InterpreterLoadLiteral) {
     InterpreterTester tester(isolate, bytecode_array);
     auto callable = tester.GetCallable<>();
     Handle<Object> return_val = callable().ToHandleChecked();
-    CHECK_EQ(i::HeapNumber::cast(*return_val)->value(), -2.1e19);
+    CHECK_EQ(i::HeapNumber::cast(*return_val).value(), -2.1e19);
   }
 
   // Strings.
@@ -195,7 +195,7 @@ TEST(InterpreterLoadLiteral) {
     InterpreterTester tester(isolate, bytecode_array);
     auto callable = tester.GetCallable<>();
     Handle<Object> return_val = callable().ToHandleChecked();
-    CHECK(i::String::cast(*return_val)->Equals(*raw_string->string()));
+    CHECK(i::String::cast(*return_val).Equals(*raw_string->string()));
   }
 }
 
@@ -424,7 +424,7 @@ TEST(InterpreterBinaryOpsBigInt) {
         Handle<Object> return_value = callable().ToHandleChecked();
         CHECK(return_value->IsBigInt());
         if (tester.HasFeedbackMetadata()) {
-          MaybeObject feedback = callable.vector()->Get(slot);
+          MaybeObject feedback = callable.vector().Get(slot);
           CHECK(feedback->IsSmi());
           CHECK_EQ(BinaryOperationFeedback::kBigInt, feedback->ToSmi().value());
         }
@@ -546,7 +546,7 @@ TEST(InterpreterStringAdd) {
     CHECK(return_value->SameValue(*test_cases[i].expected_value));
 
     if (tester.HasFeedbackMetadata()) {
-      MaybeObject feedback = callable.vector()->Get(slot);
+      MaybeObject feedback = callable.vector().Get(slot);
       CHECK(feedback->IsSmi());
       CHECK_EQ(test_cases[i].expected_feedback, feedback->ToSmi().value());
     }
@@ -609,7 +609,7 @@ TEST(InterpreterParameter8) {
   Handle<BytecodeArray> bytecode_array = builder.ToBytecodeArray(isolate);
 
   InterpreterTester tester(isolate, bytecode_array, metadata);
-  typedef Handle<Object> H;
+  using H = Handle<Object>;
   auto callable = tester.GetCallable<H, H, H, H, H, H, H, H>();
 
   Handle<Smi> arg1 = Handle<Smi>(Smi::FromInt(1), handles.main_isolate());
@@ -628,8 +628,6 @@ TEST(InterpreterParameter8) {
 }
 
 TEST(InterpreterBinaryOpTypeFeedback) {
-  if (FLAG_lite_mode) return;
-
   HandleAndZoneScope handles;
   i::Isolate* isolate = handles.main_isolate();
   Zone* zone = handles.main_zone();
@@ -754,7 +752,7 @@ TEST(InterpreterBinaryOpTypeFeedback) {
     auto callable = tester.GetCallable<>();
 
     Handle<Object> return_val = callable().ToHandleChecked();
-    MaybeObject feedback0 = callable.vector()->Get(slot0);
+    MaybeObject feedback0 = callable.vector().Get(slot0);
     CHECK(feedback0->IsSmi());
     CHECK_EQ(test_case.feedback, feedback0->ToSmi().value());
     CHECK(Object::Equals(isolate, test_case.result, return_val).ToChecked());
@@ -762,8 +760,6 @@ TEST(InterpreterBinaryOpTypeFeedback) {
 }
 
 TEST(InterpreterBinaryOpSmiTypeFeedback) {
-  if (FLAG_lite_mode) return;
-
   HandleAndZoneScope handles;
   i::Isolate* isolate = handles.main_isolate();
   Zone* zone = handles.main_zone();
@@ -862,7 +858,7 @@ TEST(InterpreterBinaryOpSmiTypeFeedback) {
     auto callable = tester.GetCallable<>();
 
     Handle<Object> return_val = callable().ToHandleChecked();
-    MaybeObject feedback0 = callable.vector()->Get(slot0);
+    MaybeObject feedback0 = callable.vector().Get(slot0);
     CHECK(feedback0->IsSmi());
     CHECK_EQ(test_case.feedback, feedback0->ToSmi().value());
     CHECK(Object::Equals(isolate, test_case.result, return_val).ToChecked());
@@ -870,8 +866,6 @@ TEST(InterpreterBinaryOpSmiTypeFeedback) {
 }
 
 TEST(InterpreterUnaryOpFeedback) {
-  if (FLAG_lite_mode) return;
-
   HandleAndZoneScope handles;
   i::Isolate* isolate = handles.main_isolate();
   Zone* zone = handles.main_zone();
@@ -925,7 +919,7 @@ TEST(InterpreterUnaryOpFeedback) {
     Handle<BytecodeArray> bytecode_array = builder.ToBytecodeArray(isolate);
 
     InterpreterTester tester(isolate, bytecode_array, metadata);
-    typedef Handle<Object> H;
+    using H = Handle<Object>;
     auto callable = tester.GetCallable<H, H, H, H, H>();
 
     Handle<Object> return_val =
@@ -935,31 +929,29 @@ TEST(InterpreterUnaryOpFeedback) {
                  test_case.bigint_feedback_value, test_case.any_feedback_value)
             .ToHandleChecked();
     USE(return_val);
-    MaybeObject feedback0 = callable.vector()->Get(slot0);
+    MaybeObject feedback0 = callable.vector().Get(slot0);
     CHECK(feedback0->IsSmi());
     CHECK_EQ(BinaryOperationFeedback::kSignedSmall, feedback0->ToSmi().value());
 
-    MaybeObject feedback1 = callable.vector()->Get(slot1);
+    MaybeObject feedback1 = callable.vector().Get(slot1);
     CHECK(feedback1->IsSmi());
     CHECK_EQ(BinaryOperationFeedback::kNumber, feedback1->ToSmi().value());
 
-    MaybeObject feedback2 = callable.vector()->Get(slot2);
+    MaybeObject feedback2 = callable.vector().Get(slot2);
     CHECK(feedback2->IsSmi());
     CHECK_EQ(BinaryOperationFeedback::kNumber, feedback2->ToSmi().value());
 
-    MaybeObject feedback3 = callable.vector()->Get(slot3);
+    MaybeObject feedback3 = callable.vector().Get(slot3);
     CHECK(feedback3->IsSmi());
     CHECK_EQ(BinaryOperationFeedback::kBigInt, feedback3->ToSmi().value());
 
-    MaybeObject feedback4 = callable.vector()->Get(slot4);
+    MaybeObject feedback4 = callable.vector().Get(slot4);
     CHECK(feedback4->IsSmi());
     CHECK_EQ(BinaryOperationFeedback::kAny, feedback4->ToSmi().value());
   }
 }
 
 TEST(InterpreterBitwiseTypeFeedback) {
-  if (FLAG_lite_mode) return;
-
   HandleAndZoneScope handles;
   i::Isolate* isolate = handles.main_isolate();
   Zone* zone = handles.main_zone();
@@ -987,7 +979,7 @@ TEST(InterpreterBitwiseTypeFeedback) {
     Handle<BytecodeArray> bytecode_array = builder.ToBytecodeArray(isolate);
 
     InterpreterTester tester(isolate, bytecode_array, metadata);
-    typedef Handle<Object> H;
+    using H = Handle<Object>;
     auto callable = tester.GetCallable<H, H, H, H>();
 
     Handle<Smi> arg1 = Handle<Smi>(Smi::FromInt(2), isolate);
@@ -998,15 +990,15 @@ TEST(InterpreterBitwiseTypeFeedback) {
     Handle<Object> return_val =
         callable(arg1, arg2, arg3, arg4).ToHandleChecked();
     USE(return_val);
-    MaybeObject feedback0 = callable.vector()->Get(slot0);
+    MaybeObject feedback0 = callable.vector().Get(slot0);
     CHECK(feedback0->IsSmi());
     CHECK_EQ(BinaryOperationFeedback::kSignedSmall, feedback0->ToSmi().value());
 
-    MaybeObject feedback1 = callable.vector()->Get(slot1);
+    MaybeObject feedback1 = callable.vector().Get(slot1);
     CHECK(feedback1->IsSmi());
     CHECK_EQ(BinaryOperationFeedback::kNumber, feedback1->ToSmi().value());
 
-    MaybeObject feedback2 = callable.vector()->Get(slot2);
+    MaybeObject feedback2 = callable.vector().Get(slot2);
     CHECK(feedback2->IsSmi());
     CHECK_EQ(BinaryOperationFeedback::kAny, feedback2->ToSmi().value());
   }
@@ -1489,24 +1481,24 @@ TEST(InterpreterCall) {
     Handle<Object> return_val = callable(object).ToHandleChecked();
     Handle<i::String> expected =
         factory->NewStringFromAsciiChecked("prefix_abcdefghij");
-    CHECK(i::String::cast(*return_val)->Equals(*expected));
+    CHECK(i::String::cast(*return_val).Equals(*expected));
   }
 }
 
-static BytecodeArrayBuilder& SetRegister(BytecodeArrayBuilder& builder,
+static BytecodeArrayBuilder& SetRegister(BytecodeArrayBuilder* builder,
                                          Register reg, int value,
                                          Register scratch) {
-  return builder.StoreAccumulatorInRegister(scratch)
+  return builder->StoreAccumulatorInRegister(scratch)
       .LoadLiteral(Smi::FromInt(value))
       .StoreAccumulatorInRegister(reg)
       .LoadAccumulatorWithRegister(scratch);
 }
 
-static BytecodeArrayBuilder& IncrementRegister(BytecodeArrayBuilder& builder,
+static BytecodeArrayBuilder& IncrementRegister(BytecodeArrayBuilder* builder,
                                                Register reg, int value,
                                                Register scratch,
                                                int slot_index) {
-  return builder.StoreAccumulatorInRegister(scratch)
+  return builder->StoreAccumulatorInRegister(scratch)
       .LoadLiteral(Smi::FromInt(value))
       .BinaryOperation(Token::Value::ADD, reg, slot_index)
       .StoreAccumulatorInRegister(reg)
@@ -1534,13 +1526,13 @@ TEST(InterpreterJumps) {
   builder.LoadLiteral(Smi::zero())
       .StoreAccumulatorInRegister(reg)
       .Jump(&label[0]);
-  SetRegister(builder, reg, 1024, scratch).Bind(&loop_header);
-  IncrementRegister(builder, reg, 1, scratch, GetIndex(slot)).Jump(&label[1]);
-  SetRegister(builder, reg, 2048, scratch).Bind(&label[0]);
-  IncrementRegister(builder, reg, 2, scratch, GetIndex(slot1))
+  SetRegister(&builder, reg, 1024, scratch).Bind(&loop_header);
+  IncrementRegister(&builder, reg, 1, scratch, GetIndex(slot)).Jump(&label[1]);
+  SetRegister(&builder, reg, 2048, scratch).Bind(&label[0]);
+  IncrementRegister(&builder, reg, 2, scratch, GetIndex(slot1))
       .JumpLoop(&loop_header, 0);
-  SetRegister(builder, reg, 4096, scratch).Bind(&label[1]);
-  IncrementRegister(builder, reg, 4, scratch, GetIndex(slot2))
+  SetRegister(&builder, reg, 4096, scratch).Bind(&label[1]);
+  IncrementRegister(&builder, reg, 4, scratch, GetIndex(slot2))
       .LoadAccumulatorWithRegister(reg)
       .Return();
 
@@ -1575,19 +1567,19 @@ TEST(InterpreterConditionalJumps) {
       .StoreAccumulatorInRegister(reg)
       .LoadFalse()
       .JumpIfFalse(ToBooleanMode::kAlreadyBoolean, &label[0]);
-  IncrementRegister(builder, reg, 1024, scratch, GetIndex(slot))
+  IncrementRegister(&builder, reg, 1024, scratch, GetIndex(slot))
       .Bind(&label[0])
       .LoadTrue()
       .JumpIfFalse(ToBooleanMode::kAlreadyBoolean, &done);
-  IncrementRegister(builder, reg, 1, scratch, GetIndex(slot1))
+  IncrementRegister(&builder, reg, 1, scratch, GetIndex(slot1))
       .LoadTrue()
       .JumpIfTrue(ToBooleanMode::kAlreadyBoolean, &label[1]);
-  IncrementRegister(builder, reg, 2048, scratch, GetIndex(slot2))
+  IncrementRegister(&builder, reg, 2048, scratch, GetIndex(slot2))
       .Bind(&label[1]);
-  IncrementRegister(builder, reg, 2, scratch, GetIndex(slot3))
+  IncrementRegister(&builder, reg, 2, scratch, GetIndex(slot3))
       .LoadFalse()
       .JumpIfTrue(ToBooleanMode::kAlreadyBoolean, &done1);
-  IncrementRegister(builder, reg, 4, scratch, GetIndex(slot4))
+  IncrementRegister(&builder, reg, 4, scratch, GetIndex(slot4))
       .LoadAccumulatorWithRegister(reg)
       .Bind(&done)
       .Bind(&done1)
@@ -1625,19 +1617,19 @@ TEST(InterpreterConditionalJumps2) {
       .StoreAccumulatorInRegister(reg)
       .LoadFalse()
       .JumpIfFalse(ToBooleanMode::kAlreadyBoolean, &label[0]);
-  IncrementRegister(builder, reg, 1024, scratch, GetIndex(slot))
+  IncrementRegister(&builder, reg, 1024, scratch, GetIndex(slot))
       .Bind(&label[0])
       .LoadTrue()
       .JumpIfFalse(ToBooleanMode::kAlreadyBoolean, &done);
-  IncrementRegister(builder, reg, 1, scratch, GetIndex(slot1))
+  IncrementRegister(&builder, reg, 1, scratch, GetIndex(slot1))
       .LoadTrue()
       .JumpIfTrue(ToBooleanMode::kAlreadyBoolean, &label[1]);
-  IncrementRegister(builder, reg, 2048, scratch, GetIndex(slot2))
+  IncrementRegister(&builder, reg, 2048, scratch, GetIndex(slot2))
       .Bind(&label[1]);
-  IncrementRegister(builder, reg, 2, scratch, GetIndex(slot3))
+  IncrementRegister(&builder, reg, 2, scratch, GetIndex(slot3))
       .LoadFalse()
       .JumpIfTrue(ToBooleanMode::kAlreadyBoolean, &done1);
-  IncrementRegister(builder, reg, 4, scratch, GetIndex(slot4))
+  IncrementRegister(&builder, reg, 4, scratch, GetIndex(slot4))
       .LoadAccumulatorWithRegister(reg)
       .Bind(&done)
       .Bind(&done1)
@@ -1831,7 +1823,7 @@ TEST(InterpreterSmiComparisons) {
         CHECK_EQ(return_value->BooleanValue(isolate),
                  CompareC(comparison, inputs[i], inputs[j]));
         if (tester.HasFeedbackMetadata()) {
-          MaybeObject feedback = callable.vector()->Get(slot);
+          MaybeObject feedback = callable.vector().Get(slot);
           CHECK(feedback->IsSmi());
           CHECK_EQ(CompareOperationFeedback::kSignedSmall,
                    feedback->ToSmi().value());
@@ -1882,7 +1874,7 @@ TEST(InterpreterHeapNumberComparisons) {
         CHECK_EQ(return_value->BooleanValue(isolate),
                  CompareC(comparison, inputs[i], inputs[j]));
         if (tester.HasFeedbackMetadata()) {
-          MaybeObject feedback = callable.vector()->Get(slot);
+          MaybeObject feedback = callable.vector().Get(slot);
           CHECK(feedback->IsSmi());
           CHECK_EQ(CompareOperationFeedback::kNumber,
                    feedback->ToSmi().value());
@@ -1927,7 +1919,7 @@ TEST(InterpreterBigIntComparisons) {
         Handle<Object> return_value = callable().ToHandleChecked();
         CHECK(return_value->IsBoolean());
         if (tester.HasFeedbackMetadata()) {
-          MaybeObject feedback = callable.vector()->Get(slot);
+          MaybeObject feedback = callable.vector().Get(slot);
           CHECK(feedback->IsSmi());
           CHECK_EQ(CompareOperationFeedback::kBigInt,
                    feedback->ToSmi().value());
@@ -1977,7 +1969,7 @@ TEST(InterpreterStringComparisons) {
         CHECK_EQ(return_value->BooleanValue(isolate),
                  CompareC(comparison, inputs[i], inputs[j]));
         if (tester.HasFeedbackMetadata()) {
-          MaybeObject feedback = callable.vector()->Get(slot);
+          MaybeObject feedback = callable.vector().Get(slot);
           CHECK(feedback->IsSmi());
           int const expected_feedback =
               Token::IsOrderedRelationalCompareOp(comparison)
@@ -2090,7 +2082,7 @@ TEST(InterpreterMixedComparisons) {
             CHECK_EQ(return_value->BooleanValue(isolate),
                      CompareC(comparison, lhs, rhs, true));
             if (tester.HasFeedbackMetadata()) {
-              MaybeObject feedback = callable.vector()->Get(slot);
+              MaybeObject feedback = callable.vector().Get(slot);
               CHECK(feedback->IsSmi());
               // Comparison with a number and string collects kAny feedback.
               CHECK_EQ(CompareOperationFeedback::kAny,
@@ -2173,7 +2165,7 @@ TEST(InterpreterStrictNotEqual) {
 }
 
 TEST(InterpreterCompareTypeOf) {
-  typedef TestTypeOfFlags::LiteralFlag LiteralFlag;
+  using LiteralFlag = TestTypeOfFlags::LiteralFlag;
   HandleAndZoneScope handles;
   Isolate* isolate = handles.main_isolate();
   Factory* factory = isolate->factory();
@@ -5030,14 +5022,14 @@ TEST(InterpreterWithNativeStack) {
   i::Handle<i::Object> o = v8::Utils::OpenHandle(*v8_compile(source_text));
   i::Handle<i::JSFunction> f = i::Handle<i::JSFunction>::cast(o);
 
-  CHECK(f->shared()->HasBytecodeArray());
-  i::Code code = f->shared()->GetCode();
+  CHECK(f->shared().HasBytecodeArray());
+  i::Code code = f->shared().GetCode();
   i::Handle<i::Code> interpreter_entry_trampoline =
       BUILTIN_CODE(isolate, InterpreterEntryTrampoline);
 
-  CHECK(code->IsCode());
-  CHECK(code->is_interpreter_trampoline_builtin());
-  CHECK_NE(code->address(), interpreter_entry_trampoline->address());
+  CHECK(code.IsCode());
+  CHECK(code.is_interpreter_trampoline_builtin());
+  CHECK_NE(code.address(), interpreter_entry_trampoline->address());
 }
 #endif  // V8_TARGET_ARCH_ARM
 
@@ -5050,28 +5042,29 @@ TEST(InterpreterGetBytecodeHandler) {
   Code wide_handler =
       interpreter->GetBytecodeHandler(Bytecode::kWide, OperandScale::kSingle);
 
-  CHECK_EQ(wide_handler->builtin_index(), Builtins::kWideHandler);
+  CHECK_EQ(wide_handler.builtin_index(), Builtins::kWideHandler);
 
   Code add_handler =
       interpreter->GetBytecodeHandler(Bytecode::kAdd, OperandScale::kSingle);
 
-  CHECK_EQ(add_handler->builtin_index(), Builtins::kAddHandler);
+  CHECK_EQ(add_handler.builtin_index(), Builtins::kAddHandler);
 
   // Test that double-width bytecode handlers deserializer correctly, including
   // an illegal bytecode handler since there is no Wide.Wide handler.
   Code wide_wide_handler =
       interpreter->GetBytecodeHandler(Bytecode::kWide, OperandScale::kDouble);
 
-  CHECK_EQ(wide_wide_handler->builtin_index(), Builtins::kIllegalHandler);
+  CHECK_EQ(wide_wide_handler.builtin_index(), Builtins::kIllegalHandler);
 
   Code add_wide_handler =
       interpreter->GetBytecodeHandler(Bytecode::kAdd, OperandScale::kDouble);
 
-  CHECK_EQ(add_wide_handler->builtin_index(), Builtins::kAddWideHandler);
+  CHECK_EQ(add_wide_handler.builtin_index(), Builtins::kAddWideHandler);
 }
 
 TEST(InterpreterCollectSourcePositions) {
   FLAG_enable_lazy_source_positions = true;
+  FLAG_stress_lazy_source_positions = false;
   HandleAndZoneScope handles;
   Isolate* isolate = handles.main_isolate();
 
@@ -5086,30 +5079,148 @@ TEST(InterpreterCollectSourcePositions) {
   Handle<SharedFunctionInfo> sfi = handle(function->shared(), isolate);
   Handle<BytecodeArray> bytecode_array =
       handle(sfi->GetBytecodeArray(), isolate);
-  ByteArray source_position_table = bytecode_array->SourcePositionTable();
-  CHECK_EQ(source_position_table->length(), 0);
+  CHECK(!bytecode_array->HasSourcePositionTable());
 
   Compiler::CollectSourcePositions(isolate, sfi);
 
+  ByteArray source_position_table = bytecode_array->SourcePositionTable();
+  CHECK(bytecode_array->HasSourcePositionTable());
+  CHECK_GT(source_position_table.length(), 0);
+}
+
+TEST(InterpreterCollectSourcePositions_StackOverflow) {
+  FLAG_enable_lazy_source_positions = true;
+  FLAG_stress_lazy_source_positions = false;
+  HandleAndZoneScope handles;
+  Isolate* isolate = handles.main_isolate();
+
+  const char* source =
+      "(function () {\n"
+      "  return 1;\n"
+      "})";
+
+  Handle<JSFunction> function = Handle<JSFunction>::cast(v8::Utils::OpenHandle(
+      *v8::Local<v8::Function>::Cast(CompileRun(source))));
+
+  Handle<SharedFunctionInfo> sfi = handle(function->shared(), isolate);
+  Handle<BytecodeArray> bytecode_array =
+      handle(sfi->GetBytecodeArray(), isolate);
+  CHECK(!bytecode_array->HasSourcePositionTable());
+
+  // Make the stack limit the same as the current position so recompilation
+  // overflows.
+  uint64_t previous_limit = isolate->stack_guard()->real_climit();
+  isolate->stack_guard()->SetStackLimit(GetCurrentStackPosition());
+  Compiler::CollectSourcePositions(isolate, sfi);
+  // Stack overflowed so source position table can be returned but is empty.
+  ByteArray source_position_table = bytecode_array->SourcePositionTable();
+  CHECK(!bytecode_array->HasSourcePositionTable());
+  CHECK_EQ(source_position_table.length(), 0);
+
+  // Reset the stack limit and try again.
+  isolate->stack_guard()->SetStackLimit(previous_limit);
+  Compiler::CollectSourcePositions(isolate, sfi);
   source_position_table = bytecode_array->SourcePositionTable();
-  CHECK_GT(source_position_table->length(), 0);
+  CHECK(bytecode_array->HasSourcePositionTable());
+  CHECK_GT(source_position_table.length(), 0);
+}
+
+TEST(InterpreterCollectSourcePositions_ThrowFrom1stFrame) {
+  FLAG_enable_lazy_source_positions = true;
+  FLAG_stress_lazy_source_positions = false;
+  HandleAndZoneScope handles;
+  Isolate* isolate = handles.main_isolate();
+
+  const char* source =
+      R"javascript(
+      (function () {
+        throw new Error();
+      });
+      )javascript";
+
+  Handle<JSFunction> function = Handle<JSFunction>::cast(v8::Utils::OpenHandle(
+      *v8::Local<v8::Function>::Cast(CompileRun(source))));
+
+  Handle<SharedFunctionInfo> sfi = handle(function->shared(), isolate);
+  // This is the bytecode for the top-level iife.
+  Handle<BytecodeArray> bytecode_array =
+      handle(sfi->GetBytecodeArray(), isolate);
+  CHECK(!bytecode_array->HasSourcePositionTable());
+
+  {
+    v8::TryCatch try_catch(CcTest::isolate());
+    MaybeHandle<Object> result = Execution::Call(
+        isolate, function, ReadOnlyRoots(isolate).undefined_value_handle(), 0,
+        nullptr);
+    CHECK(result.is_null());
+    CHECK(try_catch.HasCaught());
+  }
+
+  // The exception was caught but source positions were not retrieved from it so
+  // there should be no source position table.
+  CHECK(!bytecode_array->HasSourcePositionTable());
+}
+
+TEST(InterpreterCollectSourcePositions_ThrowFrom2ndFrame) {
+  FLAG_enable_lazy_source_positions = true;
+  FLAG_stress_lazy_source_positions = false;
+  HandleAndZoneScope handles;
+  Isolate* isolate = handles.main_isolate();
+
+  const char* source =
+      R"javascript(
+      (function () {
+        (function () {
+          throw new Error();
+        })();
+      });
+      )javascript";
+
+  Handle<JSFunction> function = Handle<JSFunction>::cast(v8::Utils::OpenHandle(
+      *v8::Local<v8::Function>::Cast(CompileRun(source))));
+
+  Handle<SharedFunctionInfo> sfi = handle(function->shared(), isolate);
+  // This is the bytecode for the top-level iife.
+  Handle<BytecodeArray> bytecode_array =
+      handle(sfi->GetBytecodeArray(), isolate);
+  CHECK(!bytecode_array->HasSourcePositionTable());
+
+  {
+    v8::TryCatch try_catch(CcTest::isolate());
+    MaybeHandle<Object> result = Execution::Call(
+        isolate, function, ReadOnlyRoots(isolate).undefined_value_handle(), 0,
+        nullptr);
+    CHECK(result.is_null());
+    CHECK(try_catch.HasCaught());
+  }
+
+  // The exception was caught but source positions were not retrieved from it so
+  // there should be no source position table.
+  CHECK(!bytecode_array->HasSourcePositionTable());
 }
 
 namespace {
+
+void CheckStringEqual(const char* expected_ptr, const char* actual_ptr) {
+  CHECK_NOT_NULL(expected_ptr);
+  CHECK_NOT_NULL(actual_ptr);
+  std::string expected(expected_ptr);
+  std::string actual(actual_ptr);
+  CHECK_EQ(expected, actual);
+}
 
 void CheckStringEqual(const char* expected_ptr, Handle<Object> actual_handle) {
   v8::String::Utf8Value utf8(
       v8::Isolate::GetCurrent(),
       v8::Utils::ToLocal(Handle<String>::cast(actual_handle)));
-  std::string expected(expected_ptr);
-  std::string actual(*utf8);
-  CHECK_EQ(expected, actual);
+  CheckStringEqual(expected_ptr, *utf8);
 }
 
 }  // namespace
 
 TEST(InterpreterCollectSourcePositions_GenerateStackTrace) {
   FLAG_enable_lazy_source_positions = true;
+  FLAG_stress_lazy_source_positions = false;
   HandleAndZoneScope handles;
   Isolate* isolate = handles.main_isolate();
 
@@ -5130,8 +5241,7 @@ TEST(InterpreterCollectSourcePositions_GenerateStackTrace) {
   Handle<SharedFunctionInfo> sfi = handle(function->shared(), isolate);
   Handle<BytecodeArray> bytecode_array =
       handle(sfi->GetBytecodeArray(), isolate);
-  ByteArray source_position_table = bytecode_array->SourcePositionTable();
-  CHECK_EQ(source_position_table->length(), 0);
+  CHECK(!bytecode_array->HasSourcePositionTable());
 
   {
     Handle<Object> result =
@@ -5142,8 +5252,26 @@ TEST(InterpreterCollectSourcePositions_GenerateStackTrace) {
     CheckStringEqual("Error\n    at <anonymous>:4:17", result);
   }
 
-  source_position_table = bytecode_array->SourcePositionTable();
-  CHECK_GT(source_position_table->length(), 0);
+  CHECK(bytecode_array->HasSourcePositionTable());
+  ByteArray source_position_table = bytecode_array->SourcePositionTable();
+  CHECK_GT(source_position_table.length(), 0);
+}
+
+TEST(InterpreterLookupNameOfBytecodeHandler) {
+  Interpreter* interpreter = CcTest::i_isolate()->interpreter();
+  Code ldaLookupSlot = interpreter->GetBytecodeHandler(Bytecode::kLdaLookupSlot,
+                                                       OperandScale::kSingle);
+  CheckStringEqual("LdaLookupSlotHandler",
+                   interpreter->LookupNameOfBytecodeHandler(ldaLookupSlot));
+  Code wideLdaLookupSlot = interpreter->GetBytecodeHandler(
+      Bytecode::kLdaLookupSlot, OperandScale::kDouble);
+  CheckStringEqual("LdaLookupSlotWideHandler",
+                   interpreter->LookupNameOfBytecodeHandler(wideLdaLookupSlot));
+  Code extraWideLdaLookupSlot = interpreter->GetBytecodeHandler(
+      Bytecode::kLdaLookupSlot, OperandScale::kQuadruple);
+  CheckStringEqual(
+      "LdaLookupSlotExtraWideHandler",
+      interpreter->LookupNameOfBytecodeHandler(extraWideLdaLookupSlot));
 }
 
 }  // namespace interpreter

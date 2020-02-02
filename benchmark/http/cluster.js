@@ -3,8 +3,9 @@ const common = require('../common.js');
 const PORT = common.PORT;
 
 const cluster = require('cluster');
+let bench;
 if (cluster.isMaster) {
-  var bench = common.createBenchmark(main, {
+  bench = common.createBenchmark(main, {
     // Unicode confuses ab on os x.
     type: ['bytes', 'buffer'],
     len: [4, 1024, 102400],
@@ -17,7 +18,7 @@ if (cluster.isMaster) {
 
 function main({ type, len, c }) {
   process.env.PORT = PORT;
-  var workers = 0;
+  let workers = 0;
   const w1 = cluster.fork();
   const w2 = cluster.fork();
 

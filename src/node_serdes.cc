@@ -1,6 +1,7 @@
 #include "node_internals.h"
 #include "node_buffer.h"
 #include "node_errors.h"
+#include "util-inl.h"
 #include "base_object-inl.h"
 
 namespace node {
@@ -273,8 +274,8 @@ void SerializerContext::WriteRawBytes(const FunctionCallbackInfo<Value>& args) {
         ctx->env(), "source must be a TypedArray or a DataView");
   }
 
-  ctx->serializer_.WriteRawBytes(Buffer::Data(args[0]),
-                                 Buffer::Length(args[0]));
+  ArrayBufferViewContents<char> bytes(args[0]);
+  ctx->serializer_.WriteRawBytes(bytes.data(), bytes.length());
 }
 
 DeserializerContext::DeserializerContext(Environment* env,

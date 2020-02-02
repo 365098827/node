@@ -203,12 +203,12 @@ void Frontend::flush()
     m_frontendChannel->flushProtocolNotifications();
 }
 
-void Frontend::sendRawNotification(String notification)
+void Frontend::sendRawJSONNotification(String notification)
 {
     m_frontendChannel->sendProtocolNotification(InternalRawNotification::fromJSON(std::move(notification)));
 }
 
-void Frontend::sendRawNotification(std::vector<uint8_t> notification)
+void Frontend::sendRawCBORNotification(std::vector<uint8_t> notification)
 {
     m_frontendChannel->sendProtocolNotification(InternalRawNotification::fromBinary(std::move(notification)));
 }
@@ -385,7 +385,6 @@ void DispatcherImpl::{{command.name}}(int callId, const String& method, const Pr
       {% endif %}
     return;
     {% else %}
-    std::unique_ptr<DispatcherBase::WeakPtr> weak = weakPtr();
     std::unique_ptr<{{command_name_title}}CallbackImpl> callback(new {{command.name | to_title_case}}CallbackImpl(weakPtr(), callId, method, message));
     m_backend->{{command.name | to_method_case}}(
       {%- for property in command.parameters -%}

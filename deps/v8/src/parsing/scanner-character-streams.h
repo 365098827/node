@@ -5,8 +5,10 @@
 #ifndef V8_PARSING_SCANNER_CHARACTER_STREAMS_H_
 #define V8_PARSING_SCANNER_CHARACTER_STREAMS_H_
 
+#include <memory>
+
 #include "include/v8.h"  // for v8::ScriptCompiler
-#include "src/globals.h"
+#include "src/common/globals.h"
 
 namespace v8 {
 namespace internal {

@@ -34,11 +34,12 @@ request.
     they pass, **probably** minor or patch
   * A breaking change helper
     ([full source](https://gist.github.com/chrisdickinson/ba532fa0e4e243fb7b44)):
-  ```sh
-  SHOW=$(git show-ref -d $(git describe --abbrev=0) | tail -n1 | awk '{print $1}')
-  git checkout $(git show -s --pretty='%T' $SHOW) -- test
-  make -j4 test
-  ```
+
+    ```sh
+    SHOW=$(git show-ref -d $(git describe --abbrev=0) | tail -n1 | awk '{print $1}')
+    git checkout $(git show -s --pretty='%T' $SHOW) -- test
+    make -j4 test
+    ```
 
 ### LTS/Version labels
 
@@ -81,5 +82,5 @@ need to be attached anymore, as only important bugfixes will be included.
   * `macos`, `windows`, `smartos`, `aix`
   * No linux, linux is the implied default
 * Architecture labels
-  * `arm`, `s390`, `ppc`
+  * `arm`, `mips`, `s390`, `ppc`
   * No x86{_64}, since that is the implied default

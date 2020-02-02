@@ -33,6 +33,9 @@
   # https://code.google.com/p/v8/issues/detail?id=7481
   'collator/check-kf-option': [FAIL],
   'collator/check-kn-option': [FAIL],
+
+  # https://code.google.com/p/v8/issues/detail?id=9312
+  'regress-9312': [FAIL],
 }],  # ALWAYS
 
 ['variant == no_wasm_traps', {
@@ -61,6 +64,8 @@
   'default_locale': [SKIP],
   # Unable to change locale and TZ on Android:
   'regress-7770': [SKIP],
+  # 'bn' locale is not included in Android.
+  'relative-time-format/resolved-options-nu-extended': [FAIL],
 }],  # 'system == android'
 
 ##############################################################################

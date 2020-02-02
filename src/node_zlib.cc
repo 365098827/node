@@ -19,11 +19,13 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+#include "memory_tracker-inl.h"
 #include "node.h"
 #include "node_buffer.h"
 
 #include "async_wrap-inl.h"
 #include "env-inl.h"
+#include "threadpoolwork-inl.h"
 #include "util-inl.h"
 
 #include "v8.h"
@@ -384,7 +386,7 @@ class CompressionStream : public AsyncWrap, public ThreadPoolWork {
   // v8 land!
   void AfterThreadPoolWork(int status) override {
     AllocScope alloc_scope(this);
-    OnScopeLeave on_scope_leave([&]() { Unref(); });
+    auto on_scope_leave = OnScopeLeave([&]() { Unref(); });
 
     write_in_progress_ = false;
 
@@ -588,7 +590,8 @@ class ZlibStream : public CompressionStream<ZlibContext> {
     CHECK(args[4]->IsUint32Array());
     Local<Uint32Array> array = args[4].As<Uint32Array>();
     Local<ArrayBuffer> ab = array->Buffer();
-    uint32_t* write_result = static_cast<uint32_t*>(ab->GetContents().Data());
+    uint32_t* write_result = static_cast<uint32_t*>(
+        ab->GetBackingStore()->Data());
 
     CHECK(args[5]->IsFunction());
     Local<Function> write_js_callback = args[5].As<Function>();

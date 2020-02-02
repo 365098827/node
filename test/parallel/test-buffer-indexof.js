@@ -236,7 +236,7 @@ assert.strictEqual(mixedByteStringUtf8.indexOf('bc'), 5);
 assert.strictEqual(mixedByteStringUtf8.indexOf('bc', 5), 5);
 assert.strictEqual(mixedByteStringUtf8.indexOf('bc', -8), 5);
 assert.strictEqual(mixedByteStringUtf8.indexOf('\u03a3'), 7);
-assert.strictEqual(-1, mixedByteStringUtf8.indexOf('\u0396'));
+assert.strictEqual(mixedByteStringUtf8.indexOf('\u0396'), -1);
 
 
 // Test complex string indexOf algorithms. Only trigger for long strings.
@@ -352,13 +352,14 @@ assert.strictEqual(Buffer.from('aaaaa').indexOf('b', 'ucs2'), -1);
   {},
   []
 ].forEach((val) => {
-  common.expectsError(
+  assert.throws(
     () => b.indexOf(val),
     {
       code: 'ERR_INVALID_ARG_TYPE',
-      type: TypeError,
-      message: 'The "value" argument must be one of type string, ' +
-               `Buffer, or Uint8Array. Received type ${typeof val}`
+      name: 'TypeError',
+      message: 'The "value" argument must be one of type number or string ' +
+               'or an instance of Buffer or Uint8Array.' +
+               common.invalidArgTypeHelper(val)
     }
   );
 });

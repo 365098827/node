@@ -46,8 +46,10 @@ DEFAULT_OUT_GN = 'out.gn'
 # Map of test name synonyms to lists of test suites. Should be ordered by
 # expected runtimes (suites with slow test cases first). These groups are
 # invoked in separate steps on the bots.
+# The mapping from names used here to GN targets (which must stay in sync)
+# is defined in infra/mb/gn_isolate_map.pyl.
 TEST_MAP = {
-  # This needs to stay in sync with test/bot_default.isolate.
+  # This needs to stay in sync with group("v8_bot_default") in test/BUILD.gn.
   "bot_default": [
     "debugger",
     "mjsunit",
@@ -62,8 +64,9 @@ TEST_MAP = {
     "preparser",
     "intl",
     "unittests",
+    "wasm-api-tests",
   ],
-  # This needs to stay in sync with test/default.isolate.
+  # This needs to stay in sync with group("v8_default") in test/BUILD.gn.
   "default": [
     "debugger",
     "mjsunit",
@@ -77,8 +80,9 @@ TEST_MAP = {
     "preparser",
     "intl",
     "unittests",
+    "wasm-api-tests",
   ],
-  # This needs to stay in sync with test/d8_default.isolate.
+  # This needs to stay in sync with group("v8_d8_default") in test/BUILD.gn.
   "d8_default": [
     "debugger",
     "mjsunit",
@@ -87,7 +91,7 @@ TEST_MAP = {
     "preparser",
     "intl",
   ],
-  # This needs to stay in sync with test/optimize_for_size.isolate.
+  # This needs to stay in sync with "v8_optimize_for_size" in test/BUILD.gn.
   "optimize_for_size": [
     "debugger",
     "mjsunit",
@@ -120,8 +124,9 @@ class ModeConfig(object):
     self.execution_mode = execution_mode
 
 
-DEBUG_FLAGS = ["--nohard-abort", "--enable-slow-asserts", "--verify-heap"]
-RELEASE_FLAGS = ["--nohard-abort"]
+DEBUG_FLAGS = ["--nohard-abort", "--enable-slow-asserts", "--verify-heap",
+               "--testing-d8-test-runner"]
+RELEASE_FLAGS = ["--nohard-abort", "--testing-d8-test-runner"]
 MODES = {
   "debug": ModeConfig(
     flags=DEBUG_FLAGS,
@@ -161,6 +166,7 @@ MODES = {
 
 PROGRESS_INDICATORS = {
   'verbose': progress.VerboseProgressIndicator,
+  'ci': progress.CIProgressIndicator,
   'dots': progress.DotsProgressIndicator,
   'color': progress.ColorProgressIndicator,
   'mono': progress.MonochromeProgressIndicator,
@@ -185,11 +191,15 @@ class BuildConfig(object):
     self.is_android = build_config['is_android']
     self.is_clang = build_config['is_clang']
     self.is_debug = build_config['is_debug']
+    self.is_full_debug = build_config['is_full_debug']
     self.msan = build_config['is_msan']
     self.no_i18n = not build_config['v8_enable_i18n_support']
-    self.no_snap = not build_config['v8_use_snapshot']
+    # TODO(https://crbug.com/v8/8531)
+    # 'v8_use_snapshot' was removed, 'no_snap' can be removed as well.
+    self.no_snap = False
     self.predictable = build_config['v8_enable_verify_predictable']
     self.tsan = build_config['is_tsan']
+    # TODO(machenbach): We only have ubsan not ubsan_vptr.
     self.ubsan_vptr = build_config['is_ubsan_vptr']
     self.embedded_builtins = build_config['v8_enable_embedded_builtins']
     self.verify_csa = build_config['v8_enable_verify_csa']
@@ -199,6 +209,11 @@ class BuildConfig(object):
     if self.arch in ['mips', 'mipsel', 'mips64', 'mips64el']:
       self.mips_arch_variant = build_config['mips_arch_variant']
       self.mips_use_msa = build_config['mips_use_msa']
+
+  @property
+  def use_sanitizer(self):
+    return (self.asan or self.cfi_vptr or self.msan or self.tsan or
+            self.ubsan_vptr)
 
   def __str__(self):
     detected_options = []
@@ -243,6 +258,11 @@ class BaseTestRunner(object):
     self.mode_name = None
     self.mode_options = None
     self.target_os = None
+
+  @property
+  def framework_name(self):
+    """String name of the base-runner subclass, used in test results."""
+    raise NotImplementedError()
 
   def execute(self, sys_args=None):
     if sys_args is None:  # pragma: no cover
@@ -301,13 +321,11 @@ class BaseTestRunner(object):
                       default=False, action="store_true")
     parser.add_option("--outdir", help="Base directory with compile output",
                       default="out")
-    parser.add_option("--buildbot", help="DEPRECATED!",
-                      default=False, action="store_true")
     parser.add_option("--arch",
                       help="The architecture to run tests for")
     parser.add_option("-m", "--mode",
-                      help="The test mode in which to run (uppercase for ninja"
-                      " and buildbot builds): %s" % MODES.keys())
+                      help="The test mode in which to run (uppercase for builds"
+                      " in CI): %s" % MODES.keys())
     parser.add_option("--shell-dir", help="DEPRECATED! Executables from build "
                       "directory will be used")
     parser.add_option("--test-root", help="Root directory of the test suites",
@@ -342,6 +360,10 @@ class BaseTestRunner(object):
     parser.add_option("--exit-after-n-failures", type="int", default=100,
                       help="Exit after the first N failures instead of "
                            "running all tests. Pass 0 to disable this feature.")
+    parser.add_option("--ci-test-completion",
+                      help="Path to a file for logging test completion in the "
+                           "context of CI progress indicator. Ignored if "
+                           "progress indicator is other than 'ci'.")
 
     # Rerun
     parser.add_option("--rerun-failures-count", default=0, type=int,
@@ -418,7 +440,7 @@ class BaseTestRunner(object):
   # gn
   # outdir
   # outdir/arch.mode
-  # Each path is provided in two versions: <path> and <path>/mode for buildbot.
+  # Each path is provided in two versions: <path> and <path>/mode for bots.
   def _possible_outdirs(self, options):
     def outdirs():
       if options.gn:
@@ -433,7 +455,7 @@ class BaseTestRunner(object):
     for outdir in outdirs():
       yield os.path.join(self.basedir, outdir)
 
-      # buildbot option
+      # bot option
       if options.mode:
         yield os.path.join(self.basedir, outdir, options.mode)
 
@@ -475,9 +497,9 @@ class BaseTestRunner(object):
 
   def _process_default_options(self, options):
     # We don't use the mode for more path-magic.
-    # Therefore transform the buildbot mode here to fix build_config value.
+    # Therefore transform the bot mode here to fix build_config value.
     if options.mode:
-      options.mode = self._buildbot_to_v8_mode(options.mode)
+      options.mode = self._bot_to_v8_mode(options.mode)
 
     build_config_mode = 'debug' if self.build_config.is_debug else 'release'
     if options.mode:
@@ -517,8 +539,8 @@ class BaseTestRunner(object):
     options.command_prefix = shlex.split(options.command_prefix)
     options.extra_flags = sum(map(shlex.split, options.extra_flags), [])
 
-  def _buildbot_to_v8_mode(self, config):
-    """Convert buildbot build configs to configs understood by the v8 runner.
+  def _bot_to_v8_mode(self, config):
+    """Convert build configs from bots to configs understood by the v8 runner.
 
     V8 configs are always lower case and without the additional _x64 suffix
     for 64 bit builds on windows with ninja.
@@ -549,6 +571,9 @@ class BaseTestRunner(object):
         asan_options.append('detect_leaks=1')
       else:
         asan_options.append('detect_leaks=0')
+      if utils.GuessOS() == 'windows':
+        # https://crbug.com/967663
+        asan_options.append('detect_stack_use_after_return=0')
       os.environ['ASAN_OPTIONS'] = ":".join(asan_options)
 
     if self.build_config.cfi_vptr:
@@ -630,7 +655,8 @@ class BaseTestRunner(object):
       if options.verbose:
         print('>>> Loading test suite: %s' % name)
       suite = testsuite.TestSuite.Load(
-          os.path.join(options.test_root, name), test_config)
+          os.path.join(options.test_root, name), test_config,
+          self.framework_name)
 
       if self._is_testsuite_supported(suite, options):
         tests = suite.load_tests_from_disk(variables)
@@ -667,6 +693,7 @@ class BaseTestRunner(object):
       "gcov_coverage": self.build_config.gcov_coverage,
       "isolates": options.isolates,
       "is_clang": self.build_config.is_clang,
+      "is_full_debug": self.build_config.is_full_debug,
       "mips_arch_variant": mips_arch_variant,
       "mode": self.mode_options.status_mode
               if not self.build_config.dcheck_always_on
@@ -706,15 +733,18 @@ class BaseTestRunner(object):
     )
 
   def _timeout_scalefactor(self, options):
+    """Increases timeout for slow build configurations."""
     factor = self.mode_options.timeout_scalefactor
-
-    # Simulators are slow, therefore allow a longer timeout.
     if self.build_config.arch in SLOW_ARCHS:
+      factor *= 4
+    if self.build_config.lite_mode:
       factor *= 2
-
-    # Predictable mode is slower.
     if self.build_config.predictable:
-      factor *= 2
+      factor *= 4
+    if self.build_config.use_sanitizer:
+      factor *= 1.5
+    if self.build_config.is_full_debug:
+      factor *= 4
 
     return factor
 
@@ -778,9 +808,13 @@ class BaseTestRunner(object):
                                                        options.junittestsuite))
     if options.json_test_results:
       procs.append(progress.JsonTestProgressIndicator(
+        self.framework_name,
         options.json_test_results,
         self.build_config.arch,
         self.mode_options.execution_mode))
+
+    for proc in procs:
+      proc.configure(options)
 
     for proc in procs:
       try:

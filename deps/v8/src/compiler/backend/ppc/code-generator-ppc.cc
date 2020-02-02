@@ -4,16 +4,16 @@
 
 #include "src/compiler/backend/code-generator.h"
 
-#include "src/assembler-inl.h"
-#include "src/callable.h"
+#include "src/codegen/assembler-inl.h"
+#include "src/codegen/callable.h"
+#include "src/codegen/macro-assembler.h"
+#include "src/codegen/optimized-compilation-info.h"
 #include "src/compiler/backend/code-generator-impl.h"
 #include "src/compiler/backend/gap-resolver.h"
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/osr.h"
-#include "src/double.h"
 #include "src/heap/heap-inl.h"  // crbug.com/v8/8499
-#include "src/macro-assembler.h"
-#include "src/optimized-compilation-info.h"
+#include "src/numbers/double.h"
 #include "src/wasm/wasm-code-manager.h"
 #include "src/wasm/wasm-objects.h"
 
@@ -79,6 +79,7 @@ class PPCOperandConverter final : public InstructionOperandConverter {
       case Constant::kDelayedStringConstant:
         return Operand::EmbeddedStringConstant(
             constant.ToDelayedStringConstant());
+      case Constant::kCompressedHeapObject:
       case Constant::kHeapObject:
       case Constant::kRpoNumber:
         break;
@@ -180,7 +181,9 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
       __ mflr(scratch0_);
       __ Push(scratch0_);
     }
-    if (stub_mode_ == StubCallMode::kCallWasmRuntimeStub) {
+    if (mode_ == RecordWriteMode::kValueIsEphemeronKey) {
+      __ CallEphemeronKeyBarrier(object_, scratch1_, save_fp_mode);
+    } else if (stub_mode_ == StubCallMode::kCallWasmRuntimeStub) {
       __ CallRecordWriteStub(object_, scratch1_, remembered_set_action,
                              save_fp_mode, wasm::WasmCode::kWasmRecordWrite);
     } else {
@@ -261,7 +264,7 @@ Condition FlagsConditionToCondition(FlagsCondition condition, ArchOpcode op) {
 }
 
 void EmitWordLoadPoisoningIfNeeded(CodeGenerator* codegen, Instruction* instr,
-                                   PPCOperandConverter& i) {
+                                   PPCOperandConverter const& i) {
   const MemoryAccessMode access_mode =
       static_cast<MemoryAccessMode>(MiscField::decode(instr->opcode()));
   if (access_mode == kMemoryAccessPoisoned) {
@@ -727,7 +730,6 @@ void FlushPendingPushRegisters(TurboAssembler* tasm,
       break;
     default:
       UNREACHABLE();
-      break;
   }
   frame_access_state->IncreaseSPDelta(pending_pushes->size());
   pending_pushes->clear();
@@ -876,8 +878,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     }
     case kArchCallBuiltinPointer: {
       DCHECK(!instr->InputAt(0)->IsImmediate());
-      Register builtin_pointer = i.InputRegister(0);
-      __ CallBuiltinPointer(builtin_pointer);
+      Register builtin_index = i.InputRegister(0);
+      __ CallBuiltinByIndex(builtin_index);
       RecordCallPosition(instr);
       frame_access_state()->ClearSPDelta();
       break;
@@ -1017,14 +1019,50 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
 #endif
       break;
     case kArchCallCFunction: {
-      int const num_parameters = MiscField::decode(instr->opcode());
+      int misc_field = MiscField::decode(instr->opcode());
+      int num_parameters = misc_field;
+      bool has_function_descriptor = false;
+      Label start_call;
+      bool isWasmCapiFunction =
+          linkage()->GetIncomingDescriptor()->IsWasmCapiFunction();
+#if defined(_AIX)
+      // AIX/PPC64BE Linux uses a function descriptor
+      int kNumParametersMask = kHasFunctionDescriptorBitMask - 1;
+      num_parameters = kNumParametersMask & misc_field;
+      has_function_descriptor =
+          (misc_field & kHasFunctionDescriptorBitMask) != 0;
+      // AIX emits 2 extra Load instructions under CallCFunctionHelper
+      // due to having function descriptor.
+      constexpr int offset = 11 * kInstrSize;
+#else
+      constexpr int offset = 9 * kInstrSize;
+#endif
+      if (isWasmCapiFunction) {
+        __ mflr(r0);
+        __ bind(&start_call);
+        __ LoadPC(kScratchReg);
+        __ addi(kScratchReg, kScratchReg, Operand(offset));
+        __ StoreP(kScratchReg,
+                  MemOperand(fp, WasmExitFrameConstants::kCallingPCOffset));
+        __ mtlr(r0);
+      }
       if (instr->InputAt(0)->IsImmediate()) {
         ExternalReference ref = i.InputExternalReference(0);
-        __ CallCFunction(ref, num_parameters);
+        __ CallCFunction(ref, num_parameters, has_function_descriptor);
       } else {
         Register func = i.InputRegister(0);
-        __ CallCFunction(func, num_parameters);
+        __ CallCFunction(func, num_parameters, has_function_descriptor);
       }
+      // TODO(miladfar): In the above block, kScratchReg must be populated with
+      // the strictly-correct PC, which is the return address at this spot. The
+      // offset is set to 36 (9 * kInstrSize) on pLinux and 44 on AIX, which is
+      // counted from where we are binding to the label and ends at this spot.
+      // If failed, replace it with the correct offset suggested. More info on
+      // f5ab7d3.
+      if (isWasmCapiFunction)
+        CHECK_EQ(offset, __ SizeOfCodeGeneratedSince(&start_call));
+
+      RecordSafepoint(instr->reference_map(), Safepoint::kNoLazyDeopt);
       frame_access_state()->SetFrameAccessToDefault();
       // Ideally, we should decrement SP delta to match the change of stack
       // pointer in CallCFunction. However, for certain architectures (e.g.
@@ -1059,22 +1097,20 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       AssembleArchTableSwitch(instr);
       DCHECK_EQ(LeaveRC, i.OutputRCBit());
       break;
-    case kArchDebugAbort:
+    case kArchAbortCSAAssert:
       DCHECK(i.InputRegister(0) == r4);
-      if (!frame_access_state()->has_frame()) {
+      {
         // We don't actually want to generate a pile of code for this, so just
         // claim there is a stack frame, without generating one.
         FrameScope scope(tasm(), StackFrame::NONE);
-        __ Call(isolate()->builtins()->builtin_handle(Builtins::kAbortJS),
-                RelocInfo::CODE_TARGET);
-      } else {
-        __ Call(isolate()->builtins()->builtin_handle(Builtins::kAbortJS),
-                RelocInfo::CODE_TARGET);
+        __ Call(
+            isolate()->builtins()->builtin_handle(Builtins::kAbortCSAAssert),
+            RelocInfo::CODE_TARGET);
       }
-      __ stop("kArchDebugAbort");
+      __ stop();
       break;
     case kArchDebugBreak:
-      __ stop("kArchDebugBreak");
+      __ stop();
       break;
     case kArchNop:
     case kArchThrowTerminator:
@@ -1082,19 +1118,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       DCHECK_EQ(LeaveRC, i.OutputRCBit());
       break;
     case kArchDeoptimize: {
-      int deopt_state_id =
+      DeoptimizationExit* exit =
           BuildTranslation(instr, -1, 0, OutputFrameStateCombine::Ignore());
-      CodeGenResult result =
-          AssembleDeoptimizerCall(deopt_state_id, current_source_position_);
+      CodeGenResult result = AssembleDeoptimizerCall(exit);
       if (result != kSuccess) return result;
       break;
     }
     case kArchRet:
       AssembleReturn(instr->InputAt(0));
-      DCHECK_EQ(LeaveRC, i.OutputRCBit());
-      break;
-    case kArchStackPointer:
-      __ mr(i.OutputRegister(), sp);
       DCHECK_EQ(LeaveRC, i.OutputRCBit());
       break;
     case kArchFramePointer:
@@ -1108,6 +1139,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         __ mr(i.OutputRegister(), fp);
       }
       break;
+    case kArchStackPointerGreaterThan: {
+      constexpr size_t kValueIndex = 0;
+      DCHECK(instr->InputAt(kValueIndex)->IsRegister());
+      __ cmpl(sp, i.InputRegister(kValueIndex), cr0);
+      break;
+    }
     case kArchTruncateDoubleToI:
       __ TruncateDoubleToI(isolate(), zone(), i.OutputRegister(),
                            i.InputDoubleRegister(0), DetermineStubCallMode());
@@ -1171,6 +1208,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       } else {
         __ LoadP(i.OutputRegister(), MemOperand(fp, offset), r0);
       }
+      break;
+    }
+    case kPPC_Sync: {
+      __ sync();
       break;
     }
     case kPPC_And:
@@ -1957,7 +1998,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
     case kPPC_AtomicStoreWord32:
     case kPPC_AtomicStoreWord64:
       UNREACHABLE();
-      break;
     case kWord32AtomicExchangeInt8:
       ASSEMBLE_ATOMIC_EXCHANGE_INTEGER(lbarx, stbcx);
       __ extsb(i.OutputRegister(0), i.OutputRegister(0));
@@ -2058,7 +2098,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
 #endif  // V8_TARGET_ARCH_PPC64
     default:
       UNREACHABLE();
-      break;
   }
   return kSuccess;
 }  // NOLINT(readability/fn_size)
@@ -2149,10 +2188,9 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
         __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
         ReferenceMap* reference_map =
             new (gen_->zone()) ReferenceMap(gen_->zone());
-        gen_->RecordSafepoint(reference_map, Safepoint::kSimple,
-                              Safepoint::kNoLazyDeopt);
+        gen_->RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
         if (FLAG_debug_code) {
-          __ stop(GetAbortReason(AbortReason::kUnexpectedReturnFromWasmTrap));
+          __ stop();
         }
       }
     }
@@ -2306,14 +2344,20 @@ void CodeGenerator::AssembleConstructFrame() {
   auto call_descriptor = linkage()->GetIncomingDescriptor();
   if (frame_access_state()->has_frame()) {
     if (call_descriptor->IsCFunctionCall()) {
-      __ mflr(r0);
-      if (FLAG_enable_embedded_constant_pool) {
-        __ Push(r0, fp, kConstantPoolRegister);
-        // Adjust FP to point to saved FP.
-        __ subi(fp, sp, Operand(StandardFrameConstants::kConstantPoolOffset));
+      if (info()->GetOutputStackFrameType() == StackFrame::C_WASM_ENTRY) {
+        __ StubPrologue(StackFrame::C_WASM_ENTRY);
+        // Reserve stack space for saving the c_entry_fp later.
+        __ addi(sp, sp, Operand(-kSystemPointerSize));
       } else {
-        __ Push(r0, fp);
-        __ mr(fp, sp);
+        __ mflr(r0);
+        if (FLAG_enable_embedded_constant_pool) {
+          __ Push(r0, fp, kConstantPoolRegister);
+          // Adjust FP to point to saved FP.
+          __ subi(fp, sp, Operand(StandardFrameConstants::kConstantPoolOffset));
+        } else {
+          __ Push(r0, fp);
+          __ mr(fp, sp);
+        }
       }
     } else if (call_descriptor->IsJSFunctionCall()) {
       __ Prologue();
@@ -2327,7 +2371,8 @@ void CodeGenerator::AssembleConstructFrame() {
       __ StubPrologue(type);
       if (call_descriptor->IsWasmFunctionCall()) {
         __ Push(kWasmInstanceRegister);
-      } else if (call_descriptor->IsWasmImportWrapper()) {
+      } else if (call_descriptor->IsWasmImportWrapper() ||
+                 call_descriptor->IsWasmCapiFunction()) {
         // WASM import wrappers are passed a tuple in the place of the instance.
         // Unpack the tuple into the instance and the target callable.
         // This must be done here in the codegen because it cannot be expressed
@@ -2337,12 +2382,16 @@ void CodeGenerator::AssembleConstructFrame() {
         __ LoadP(kWasmInstanceRegister,
                  FieldMemOperand(kWasmInstanceRegister, Tuple2::kValue1Offset));
         __ Push(kWasmInstanceRegister);
+        if (call_descriptor->IsWasmCapiFunction()) {
+          // Reserve space for saving the PC later.
+          __ addi(sp, sp, Operand(-kSystemPointerSize));
+        }
       }
     }
   }
 
-  int required_slots = frame()->GetTotalFrameSlotCount() -
-                       call_descriptor->CalculateFixedFrameSize();
+  int required_slots =
+      frame()->GetTotalFrameSlotCount() - frame()->GetFixedSlotCount();
   if (info()->is_osr()) {
     // TurboFan OSR-compiled functions cannot be entered directly.
     __ Abort(AbortReason::kShouldNotDirectlyEnterOsrFunction);
@@ -2389,10 +2438,9 @@ void CodeGenerator::AssembleConstructFrame() {
       __ Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
       // We come from WebAssembly, there are no references for the GC.
       ReferenceMap* reference_map = new (zone()) ReferenceMap(zone());
-      RecordSafepoint(reference_map, Safepoint::kSimple,
-                      Safepoint::kNoLazyDeopt);
+      RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
       if (FLAG_debug_code) {
-        __ stop(GetAbortReason(AbortReason::kUnexpectedReturnFromThrow));
+        __ stop();
       }
 
       __ bind(&done);
@@ -2483,6 +2531,8 @@ void CodeGenerator::AssembleReturn(InstructionOperand* pop) {
 
 void CodeGenerator::FinishCode() {}
 
+void CodeGenerator::PrepareForDeoptimizationExits(int deopt_count) {}
+
 void CodeGenerator::AssembleMove(InstructionOperand* source,
                                  InstructionOperand* destination) {
   PPCOperandConverter g(this, nullptr);
@@ -2557,6 +2607,8 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
           }
           break;
         }
+        case Constant::kCompressedHeapObject:
+          UNREACHABLE();
         case Constant::kRpoNumber:
           UNREACHABLE();  // TODO(dcarney): loading RPO constants on PPC.
           break;

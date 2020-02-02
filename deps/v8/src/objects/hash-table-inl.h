@@ -7,11 +7,12 @@
 
 #include "src/objects/hash-table.h"
 
+#include "src/execution/isolate-utils-inl.h"
 #include "src/heap/heap.h"
-#include "src/objects-inl.h"
 #include "src/objects/fixed-array-inl.h"
 #include "src/objects/heap-object-inl.h"
-#include "src/roots-inl.h"
+#include "src/objects/objects-inl.h"
+#include "src/roots/roots-inl.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -49,15 +50,41 @@ CAST_ACCESSOR(ObjectHashTable)
 CAST_ACCESSOR(EphemeronHashTable)
 CAST_ACCESSOR(ObjectHashSet)
 
+void EphemeronHashTable::set_key(int index, Object value) {
+  DCHECK_NE(GetReadOnlyRoots().fixed_cow_array_map(), map());
+  DCHECK(IsEphemeronHashTable());
+  DCHECK_GE(index, 0);
+  DCHECK_LT(index, this->length());
+  int offset = kHeaderSize + index * kTaggedSize;
+  RELAXED_WRITE_FIELD(*this, offset, value);
+  EPHEMERON_KEY_WRITE_BARRIER(*this, offset, value);
+}
+
+void EphemeronHashTable::set_key(int index, Object value,
+                                 WriteBarrierMode mode) {
+  DCHECK_NE(GetReadOnlyRoots().fixed_cow_array_map(), map());
+  DCHECK(IsEphemeronHashTable());
+  DCHECK_GE(index, 0);
+  DCHECK_LT(index, this->length());
+  int offset = kHeaderSize + index * kTaggedSize;
+  RELAXED_WRITE_FIELD(*this, offset, value);
+  CONDITIONAL_EPHEMERON_KEY_WRITE_BARRIER(*this, offset, value, mode);
+}
+
 int HashTableBase::NumberOfElements() const {
-  return Smi::ToInt(get(kNumberOfElementsIndex));
+  int offset = OffsetOfElementAt(kNumberOfElementsIndex);
+  return TaggedField<Smi>::load(*this, offset).value();
 }
 
 int HashTableBase::NumberOfDeletedElements() const {
-  return Smi::ToInt(get(kNumberOfDeletedElementsIndex));
+  int offset = OffsetOfElementAt(kNumberOfDeletedElementsIndex);
+  return TaggedField<Smi>::load(*this, offset).value();
 }
 
-int HashTableBase::Capacity() const { return Smi::ToInt(get(kCapacityIndex)); }
+int HashTableBase::Capacity() const {
+  int offset = OffsetOfElementAt(kCapacityIndex);
+  return TaggedField<Smi>::load(*this, offset).value();
+}
 
 void HashTableBase::ElementAdded() {
   SetNumberOfElements(NumberOfElements() + 1);
@@ -143,6 +170,49 @@ bool HashTable<Derived, Shape>::ToKey(ReadOnlyRoots roots, int entry,
   return true;
 }
 
+template <typename Derived, typename Shape>
+bool HashTable<Derived, Shape>::ToKey(Isolate* isolate, int entry,
+                                      Object* out_k) {
+  Object k = KeyAt(isolate, entry);
+  if (!IsKey(GetReadOnlyRoots(isolate), k)) return false;
+  *out_k = Shape::Unwrap(k);
+  return true;
+}
+
+template <typename Derived, typename Shape>
+Object HashTable<Derived, Shape>::KeyAt(int entry) {
+  Isolate* isolate = GetIsolateForPtrCompr(*this);
+  return KeyAt(isolate, entry);
+}
+
+template <typename Derived, typename Shape>
+Object HashTable<Derived, Shape>::KeyAt(Isolate* isolate, int entry) {
+  return get(isolate, EntryToIndex(entry) + kEntryKeyIndex);
+}
+
+template <typename Derived, typename Shape>
+void HashTable<Derived, Shape>::set_key(int index, Object value) {
+  DCHECK(!IsEphemeronHashTable());
+  FixedArray::set(index, value);
+}
+
+template <typename Derived, typename Shape>
+void HashTable<Derived, Shape>::set_key(int index, Object value,
+                                        WriteBarrierMode mode) {
+  DCHECK(!IsEphemeronHashTable());
+  FixedArray::set(index, value, mode);
+}
+
+template <typename Derived, typename Shape>
+void HashTable<Derived, Shape>::SetCapacity(int capacity) {
+  // To scale a computed hash code to fit within the hash table, we
+  // use bit-wise AND with a mask, so the capacity must be positive
+  // and non-zero.
+  DCHECK_GT(capacity, 0);
+  DCHECK_LE(capacity, kMaxCapacity);
+  set(kCapacityIndex, Smi::FromInt(capacity));
+}
+
 template <typename KeyT>
 bool BaseShape<KeyT>::IsKey(ReadOnlyRoots roots, Object key) {
   return IsLive(roots, key);
@@ -159,7 +229,7 @@ bool ObjectHashSet::Has(Isolate* isolate, Handle<Object> key, int32_t hash) {
 
 bool ObjectHashSet::Has(Isolate* isolate, Handle<Object> key) {
   Object hash = key->GetHash();
-  if (!hash->IsSmi()) return false;
+  if (!hash.IsSmi()) return false;
   return FindEntry(ReadOnlyRoots(isolate), key, Smi::ToInt(hash)) != kNotFound;
 }
 
@@ -173,7 +243,7 @@ uint32_t ObjectHashTableShape::Hash(Isolate* isolate, Handle<Object> key) {
 
 uint32_t ObjectHashTableShape::HashForObject(ReadOnlyRoots roots,
                                              Object other) {
-  return Smi::ToInt(other->GetHash());
+  return Smi::ToInt(other.GetHash());
 }
 
 }  // namespace internal

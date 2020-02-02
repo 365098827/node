@@ -8,16 +8,17 @@
 #include "src/heap/barrier.h"
 #include "src/heap/gc-tracer.h"
 #include "src/heap/heap-inl.h"
+#include "src/heap/invalidated-slots-inl.h"
 #include "src/heap/item-parallel-job.h"
 #include "src/heap/mark-compact-inl.h"
 #include "src/heap/objects-visiting-inl.h"
 #include "src/heap/scavenger-inl.h"
 #include "src/heap/sweeper.h"
-#include "src/objects-body-descriptors-inl.h"
 #include "src/objects/data-handler-inl.h"
 #include "src/objects/embedder-data-array-inl.h"
-#include "src/transitions-inl.h"
-#include "src/utils-inl.h"
+#include "src/objects/objects-body-descriptors-inl.h"
+#include "src/objects/transitions-inl.h"
+#include "src/utils/utils-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -41,10 +42,20 @@ class ScavengingTask final : public ItemParallelJob::Task {
         scavenger_(scavenger),
         barrier_(barrier) {}
 
-  void RunInParallel() final {
-    TRACE_BACKGROUND_GC(
-        heap_->tracer(),
-        GCTracer::BackgroundScope::SCAVENGER_BACKGROUND_SCAVENGE_PARALLEL);
+  void RunInParallel(Runner runner) final {
+    if (runner == Runner::kForeground) {
+      TRACE_GC(heap_->tracer(), GCTracer::Scope::SCAVENGER_SCAVENGE_PARALLEL);
+      ProcessItems();
+    } else {
+      TRACE_BACKGROUND_GC(
+          heap_->tracer(),
+          GCTracer::BackgroundScope::SCAVENGER_BACKGROUND_SCAVENGE_PARALLEL);
+      ProcessItems();
+    }
+  }
+
+ private:
+  void ProcessItems() {
     double scavenging_time = 0.0;
     {
       barrier_->Start();
@@ -66,8 +77,6 @@ class ScavengingTask final : public ItemParallelJob::Task {
                    scavenger_->bytes_copied(), scavenger_->bytes_promoted());
     }
   }
-
- private:
   Heap* const heap_;
   Scavenger* const scavenger_;
   OneshotBarrier* const barrier_;
@@ -96,6 +105,20 @@ class IterateAndScavengePromotedObjectsVisitor final : public ObjectVisitor {
   V8_INLINE void VisitEmbeddedPointer(Code host, RelocInfo* rinfo) final {
     HeapObject heap_object = rinfo->target_object();
     HandleSlot(host, FullHeapObjectSlot(&heap_object), heap_object);
+  }
+
+  inline void VisitEphemeron(HeapObject obj, int entry, ObjectSlot key,
+                             ObjectSlot value) override {
+    DCHECK(Heap::IsLargeObject(obj) || obj.IsEphemeronHashTable());
+    VisitPointer(obj, value);
+
+    if (ObjectInYoungGeneration(*key)) {
+      // We cannot check the map here, as it might be a large object.
+      scavenger_->RememberPromotedEphemeron(
+          EphemeronHashTable::unchecked_cast(obj), entry);
+    } else {
+      VisitPointer(obj, key);
+    }
   }
 
  private:
@@ -129,9 +152,18 @@ class IterateAndScavengePromotedObjectsVisitor final : public ObjectVisitor {
       DCHECK(success);
 
       if (result == KEEP_SLOT) {
-        SLOW_DCHECK(target->IsHeapObject());
-        RememberedSet<OLD_TO_NEW>::Insert(MemoryChunk::FromHeapObject(host),
-                                          slot.address());
+        SLOW_DCHECK(target.IsHeapObject());
+        MemoryChunk* chunk = MemoryChunk::FromHeapObject(host);
+
+        // Sweeper is stopped during scavenge, so we can directly
+        // insert into its remembered set here.
+        if (chunk->sweeping_slot_set()) {
+          RememberedSetSweeping::Insert<AccessMode::ATOMIC>(chunk,
+                                                            slot.address());
+        } else {
+          RememberedSet<OLD_TO_NEW>::Insert<AccessMode::ATOMIC>(chunk,
+                                                                slot.address());
+        }
       }
       SLOW_DCHECK(!MarkCompactCollector::IsOnEvacuationCandidate(
           HeapObject::cast(target)));
@@ -142,8 +174,8 @@ class IterateAndScavengePromotedObjectsVisitor final : public ObjectVisitor {
       // We cannot call MarkCompactCollector::RecordSlot because that checks
       // that the host page is not in young generation, which does not hold
       // for pending large pages.
-      RememberedSet<OLD_TO_OLD>::Insert(MemoryChunk::FromHeapObject(host),
-                                        slot.address());
+      RememberedSet<OLD_TO_OLD>::Insert<AccessMode::ATOMIC>(
+          MemoryChunk::FromHeapObject(host), slot.address());
     }
   }
 
@@ -155,13 +187,13 @@ namespace {
 
 V8_INLINE bool IsUnscavengedHeapObject(Heap* heap, Object object) {
   return Heap::InFromPage(object) &&
-         !HeapObject::cast(object)->map_word().IsForwardingAddress();
+         !HeapObject::cast(object).map_word().IsForwardingAddress();
 }
 
 // Same as IsUnscavengedHeapObject() above but specialized for HeapObjects.
 V8_INLINE bool IsUnscavengedHeapObject(Heap* heap, HeapObject heap_object) {
   return Heap::InFromPage(heap_object) &&
-         !heap_object->map_word().IsForwardingAddress();
+         !heap_object.map_word().IsForwardingAddress();
 }
 
 bool IsUnscavengedHeapObjectSlot(Heap* heap, FullObjectSlot p) {
@@ -177,7 +209,7 @@ class ScavengeWeakObjectRetainer : public WeakObjectRetainer {
       return object;
     }
 
-    MapWord map_word = HeapObject::cast(object)->map_word();
+    MapWord map_word = HeapObject::cast(object).map_word();
     if (map_word.IsForwardingAddress()) {
       return map_word.ToForwardingAddress();
     }
@@ -216,8 +248,10 @@ void ScavengerCollector::CollectGarbage() {
     // access to the slots of a page and can completely avoid any locks on
     // the page itself.
     Sweeper::FilterSweepingPagesScope filter_scope(sweeper, pause_scope);
-    filter_scope.FilterOldSpaceSweepingPages(
-        [](Page* page) { return !page->ContainsSlots<OLD_TO_NEW>(); });
+    filter_scope.FilterOldSpaceSweepingPages([](Page* page) {
+      return !page->ContainsSlots<OLD_TO_NEW>() && !page->sweeping_slot_set();
+    });
+
     RememberedSet<OLD_TO_NEW>::IterateMemoryChunks(
         heap_, [&job](MemoryChunk* chunk) {
           job.AddItem(new PageScavengingItem(chunk));
@@ -312,11 +346,7 @@ void ScavengerCollector::CollectGarbage() {
   heap_->new_lo_space()->FreeDeadObjects([](HeapObject) { return true; });
 
   RememberedSet<OLD_TO_NEW>::IterateMemoryChunks(heap_, [](MemoryChunk* chunk) {
-    if (chunk->SweepingDone()) {
-      RememberedSet<OLD_TO_NEW>::FreeEmptyBuckets(chunk);
-    } else {
-      RememberedSet<OLD_TO_NEW>::PreFreeEmptyBuckets(chunk);
-    }
+    RememberedSet<OLD_TO_NEW>::FreeEmptyBuckets(chunk);
   });
 
   // Update how much has survived scavenge.
@@ -330,7 +360,7 @@ void ScavengerCollector::HandleSurvivingNewLargeObjects() {
     Map map = update_info.second;
     // Order is important here. We have to re-install the map to have access
     // to meta-data like size during page promotion.
-    object->set_map_word(MapWord::FromMap(map));
+    object.set_map_word(MapWord::FromMap(map));
     LargePage* page = LargePage::FromHeapObject(object);
     heap_->lo_space()->PromoteNewLargeObject(page);
   }
@@ -349,7 +379,7 @@ void ScavengerCollector::MergeSurvivingNewLargeObjects(
 int ScavengerCollector::NumberOfScavengeTasks() {
   if (!FLAG_parallel_scavenge) return 1;
   const int num_scavenge_tasks =
-      static_cast<int>(heap_->new_space()->TotalCapacity()) / MB;
+      static_cast<int>(heap_->new_space()->TotalCapacity()) / MB + 1;
   static int num_cores = V8::GetCurrentPlatform()->NumberOfWorkerThreads() + 1;
   int tasks =
       Max(1, Min(Min(num_scavenge_tasks, kMaxScavengerTasks), num_cores));
@@ -389,11 +419,17 @@ void Scavenger::IterateAndScavengePromotedObject(HeapObject target, Map map,
       is_compacting_ &&
       heap()->incremental_marking()->atomic_marking_state()->IsBlack(target);
   IterateAndScavengePromotedObjectsVisitor visitor(this, record_slots);
-  target->IterateBodyFast(map, size, &visitor);
+  target.IterateBodyFast(map, size, &visitor);
+}
+
+void Scavenger::RememberPromotedEphemeron(EphemeronHashTable table, int entry) {
+  auto indices =
+      ephemeron_remembered_set_.insert({table, std::unordered_set<int>()});
+  indices.first->second.insert(entry);
 }
 
 void Scavenger::AddPageToSweeperIfNecessary(MemoryChunk* page) {
-  AllocationSpace space = page->owner()->identity();
+  AllocationSpace space = page->owner_identity();
   if ((space == OLD_SPACE) && !page->SweepingDone()) {
     heap()->mark_compact_collector()->sweeper()->AddPage(
         space, reinterpret_cast<Page*>(page),
@@ -401,14 +437,46 @@ void Scavenger::AddPageToSweeperIfNecessary(MemoryChunk* page) {
   }
 }
 
+// Remove this crashkey after chromium:1010312 is fixed.
+class ScopedFullHeapCrashKey {
+ public:
+  explicit ScopedFullHeapCrashKey(Isolate* isolate) : isolate_(isolate) {
+    isolate_->AddCrashKey(v8::CrashKeyId::kDumpType, "heap");
+  }
+  ~ScopedFullHeapCrashKey() {
+    isolate_->AddCrashKey(v8::CrashKeyId::kDumpType, "");
+  }
+
+ private:
+  Isolate* isolate_ = nullptr;
+};
+
 void Scavenger::ScavengePage(MemoryChunk* page) {
+  ScopedFullHeapCrashKey collect_full_heap_dump_if_crash(heap_->isolate());
   CodePageMemoryModificationScope memory_modification_scope(page);
-  RememberedSet<OLD_TO_NEW>::Iterate(page,
-                                     [this](MaybeObjectSlot addr) {
-                                       return CheckAndScavengeObject(heap_,
-                                                                     addr);
-                                     },
-                                     SlotSet::KEEP_EMPTY_BUCKETS);
+  InvalidatedSlotsFilter filter = InvalidatedSlotsFilter::OldToNew(page);
+  RememberedSet<OLD_TO_NEW>::Iterate(
+      page,
+      [this, &filter](MaybeObjectSlot slot) {
+        if (!filter.IsValid(slot.address())) return REMOVE_SLOT;
+        return CheckAndScavengeObject(heap_, slot);
+      },
+      SlotSet::KEEP_EMPTY_BUCKETS);
+  filter = InvalidatedSlotsFilter::OldToNew(page);
+  RememberedSetSweeping::Iterate(
+      page,
+      [this, &filter](MaybeObjectSlot slot) {
+        if (!filter.IsValid(slot.address())) return REMOVE_SLOT;
+        return CheckAndScavengeObject(heap_, slot);
+      },
+      SlotSet::KEEP_EMPTY_BUCKETS);
+
+  if (page->invalidated_slots<OLD_TO_NEW>() != nullptr) {
+    // The invalidated slots are not needed after old-to-new slots were
+    // processed.
+    page->ReleaseInvalidatedSlots<OLD_TO_NEW>();
+  }
+
   RememberedSet<OLD_TO_NEW>::IterateTyped(
       page, [=](SlotType type, Address addr) {
         return UpdateTypedSlotHelper::UpdateTypedSlot(
@@ -443,7 +511,6 @@ void Scavenger::Process(OneshotBarrier* barrier) {
     struct PromotionListEntry entry;
     while (promotion_list_.Pop(&entry)) {
       HeapObject target = entry.heap_object;
-      DCHECK(!target->IsMap());
       IterateAndScavengePromotedObject(target, entry.map, entry.size);
       done = false;
       if (have_barrier && ((++objects % kInterruptThreshold) == 0)) {
@@ -460,27 +527,62 @@ void ScavengerCollector::ProcessWeakReferences(
   ScavengeWeakObjectRetainer weak_object_retainer;
   heap_->ProcessYoungWeakReferences(&weak_object_retainer);
   ClearYoungEphemerons(ephemeron_table_list);
+  ClearOldEphemerons();
 }
 
-// Clears ephemerons contained in {EphemeronHashTable}s in young generation.
+// Clear ephemeron entries from EphemeronHashTables in new-space whenever the
+// entry has a dead new-space key.
 void ScavengerCollector::ClearYoungEphemerons(
     EphemeronTableList* ephemeron_table_list) {
   ephemeron_table_list->Iterate([this](EphemeronHashTable table) {
-    for (int i = 0; i < table->Capacity(); i++) {
-      ObjectSlot key_slot =
-          table->RawFieldOfElementAt(EphemeronHashTable::EntryToIndex(i));
-      Object key = *key_slot;
-      if (key->IsHeapObject()) {
-        if (IsUnscavengedHeapObject(heap_, HeapObject::cast(key))) {
-          table->RemoveEntry(i);
-        } else {
-          HeapObject forwarded = ForwardingAddress(HeapObject::cast(key));
-          HeapObjectReference::Update(HeapObjectSlot(key_slot), forwarded);
-        }
+    for (int i = 0; i < table.Capacity(); i++) {
+      // Keys in EphemeronHashTables must be heap objects.
+      HeapObjectSlot key_slot(
+          table.RawFieldOfElementAt(EphemeronHashTable::EntryToIndex(i)));
+      HeapObject key = key_slot.ToHeapObject();
+      if (IsUnscavengedHeapObject(heap_, key)) {
+        table.RemoveEntry(i);
+      } else {
+        HeapObject forwarded = ForwardingAddress(key);
+        key_slot.StoreHeapObject(forwarded);
       }
     }
   });
   ephemeron_table_list->Clear();
+}
+
+// Clear ephemeron entries from EphemeronHashTables in old-space whenever the
+// entry has a dead new-space key.
+void ScavengerCollector::ClearOldEphemerons() {
+  for (auto it = heap_->ephemeron_remembered_set_.begin();
+       it != heap_->ephemeron_remembered_set_.end();) {
+    EphemeronHashTable table = it->first;
+    auto& indices = it->second;
+    for (auto iti = indices.begin(); iti != indices.end();) {
+      // Keys in EphemeronHashTables must be heap objects.
+      HeapObjectSlot key_slot(
+          table.RawFieldOfElementAt(EphemeronHashTable::EntryToIndex(*iti)));
+      HeapObject key = key_slot.ToHeapObject();
+      if (IsUnscavengedHeapObject(heap_, key)) {
+        table.RemoveEntry(*iti);
+        iti = indices.erase(iti);
+      } else {
+        HeapObject forwarded = ForwardingAddress(key);
+        key_slot.StoreHeapObject(forwarded);
+        if (!Heap::InYoungGeneration(forwarded)) {
+          iti = indices.erase(iti);
+        } else {
+          ++iti;
+        }
+      }
+    }
+
+    if (indices.size() == 0) {
+      it = heap_->ephemeron_remembered_set_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 void Scavenger::Finalize() {
@@ -490,6 +592,14 @@ void Scavenger::Finalize() {
   collector_->MergeSurvivingNewLargeObjects(surviving_new_large_objects_);
   allocator_.Finalize();
   ephemeron_table_list_.FlushToGlobal();
+  for (auto it = ephemeron_remembered_set_.begin();
+       it != ephemeron_remembered_set_.end(); ++it) {
+    auto insert_result = heap()->ephemeron_remembered_set_.insert(
+        {it->first, std::unordered_set<int>()});
+    for (int entry : it->second) {
+      insert_result.first->second.insert(entry);
+    }
+  }
 }
 
 void Scavenger::AddEphemeronHashTable(EphemeronHashTable table) {

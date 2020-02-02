@@ -7,13 +7,37 @@
 
 #include "src/wasm/baseline/liftoff-assembler.h"
 
-#define BAILOUT(reason) bailout("mips64 " reason)
-
 namespace v8 {
 namespace internal {
 namespace wasm {
 
 namespace liftoff {
+
+// Liftoff Frames.
+//
+//  slot      Frame
+//       +--------------------+---------------------------
+//  n+4  | optional padding slot to keep the stack 16 byte aligned.
+//  n+3  |   parameter n      |
+//  ...  |       ...          |
+//   4   |   parameter 1      | or parameter 2
+//   3   |   parameter 0      | or parameter 1
+//   2   |  (result address)  | or parameter 0
+//  -----+--------------------+---------------------------
+//   1   | return addr (ra)   |
+//   0   | previous frame (fp)|
+//  -----+--------------------+  <-- frame ptr (fp)
+//  -1   | 0xa: WASM_COMPILED |
+//  -2   |     instance       |
+//  -----+--------------------+---------------------------
+//  -3   |     slot 0         |   ^
+//  -4   |     slot 1         |   |
+//       |                    | Frame slots
+//       |                    |   |
+//       |                    |   v
+//       | optional padding slot to keep the stack 16 byte aligned.
+//  -----+--------------------+  <-- stack ptr (sp)
+//
 
 // fp-8 holds the stack marker, fp-16 is the instance parameter, first stack
 // slot is located at fp-24.
@@ -21,9 +45,12 @@ constexpr int32_t kConstantStackSpace = 16;
 constexpr int32_t kFirstStackSlotOffset =
     kConstantStackSpace + LiftoffAssembler::kStackSlotSize;
 
+inline int GetStackSlotOffset(uint32_t index) {
+  return kFirstStackSlotOffset + index * LiftoffAssembler::kStackSlotSize;
+}
+
 inline MemOperand GetStackSlot(uint32_t index) {
-  int32_t offset = index * LiftoffAssembler::kStackSlotSize;
-  return MemOperand(fp, -kFirstStackSlotOffset - offset);
+  return MemOperand(fp, -GetStackSlotOffset(index));
 }
 
 inline MemOperand GetInstanceOperand() { return MemOperand(fp, -16); }
@@ -436,13 +463,13 @@ void LiftoffAssembler::Spill(uint32_t index, LiftoffRegister reg,
   MemOperand dst = liftoff::GetStackSlot(index);
   switch (type) {
     case kWasmI32:
-      sw(reg.gp(), dst);
+      Sw(reg.gp(), dst);
       break;
     case kWasmI64:
-      sd(reg.gp(), dst);
+      Sd(reg.gp(), dst);
       break;
     case kWasmF32:
-      swc1(reg.fp(), dst);
+      Swc1(reg.fp(), dst);
       break;
     case kWasmF64:
       TurboAssembler::Sdc1(reg.fp(), dst);
@@ -480,13 +507,13 @@ void LiftoffAssembler::Fill(LiftoffRegister reg, uint32_t index,
   MemOperand src = liftoff::GetStackSlot(index);
   switch (type) {
     case kWasmI32:
-      lw(reg.gp(), src);
+      Lw(reg.gp(), src);
       break;
     case kWasmI64:
-      ld(reg.gp(), src);
+      Ld(reg.gp(), src);
       break;
     case kWasmF32:
-      lwc1(reg.fp(), src);
+      Lwc1(reg.fp(), src);
       break;
     case kWasmF64:
       TurboAssembler::Ldc1(reg.fp(), src);
@@ -498,6 +525,35 @@ void LiftoffAssembler::Fill(LiftoffRegister reg, uint32_t index,
 
 void LiftoffAssembler::FillI64Half(Register, uint32_t index, RegPairHalf) {
   UNREACHABLE();
+}
+
+void LiftoffAssembler::FillStackSlotsWithZero(uint32_t index, uint32_t count) {
+  DCHECK_LT(0, count);
+  uint32_t last_stack_slot = index + count - 1;
+  RecordUsedSpillSlot(last_stack_slot);
+
+  if (count <= 12) {
+    // Special straight-line code for up to 12 slots. Generates one
+    // instruction per slot (<= 12 instructions total).
+    for (uint32_t offset = 0; offset < count; ++offset) {
+      Sd(zero_reg, liftoff::GetStackSlot(index + offset));
+    }
+  } else {
+    // General case for bigger counts (12 instructions).
+    // Use a0 for start address (inclusive), a1 for end address (exclusive).
+    Push(a1, a0);
+    Daddu(a0, fp, Operand(-liftoff::GetStackSlotOffset(last_stack_slot)));
+    Daddu(a1, fp,
+          Operand(-liftoff::GetStackSlotOffset(index) + kStackSlotSize));
+
+    Label loop;
+    bind(&loop);
+    Sd(zero_reg, MemOperand(a0, kSystemPointerSize));
+    daddiu(a0, a0, kSystemPointerSize);
+    BranchShort(&loop, ne, a0, Operand(a1));
+
+    Pop(a1, a0);
+  }
 }
 
 void LiftoffAssembler::emit_i32_mul(Register dst, Register lhs, Register rhs) {
@@ -554,6 +610,21 @@ I32_BINOP(xor, xor_)
 // clang-format on
 
 #undef I32_BINOP
+
+#define I32_BINOP_I(name, instruction)                               \
+  void LiftoffAssembler::emit_i32_##name(Register dst, Register lhs, \
+                                         int32_t imm) {              \
+    instruction(dst, lhs, Operand(imm));                             \
+  }
+
+// clang-format off
+I32_BINOP_I(add, Addu)
+I32_BINOP_I(and, And)
+I32_BINOP_I(or, Or)
+I32_BINOP_I(xor, Xor)
+// clang-format on
+
+#undef I32_BINOP_I
 
 bool LiftoffAssembler::emit_i32_clz(Register dst, Register src) {
   TurboAssembler::Clz(dst, src);
@@ -655,6 +726,21 @@ I64_BINOP(xor, xor_)
 
 #undef I64_BINOP
 
+#define I64_BINOP_I(name, instruction)                                       \
+  void LiftoffAssembler::emit_i64_##name(LiftoffRegister dst,                \
+                                         LiftoffRegister lhs, int32_t imm) { \
+    instruction(dst.gp(), lhs.gp(), Operand(imm));                           \
+  }
+
+// clang-format off
+I64_BINOP_I(add, Daddu)
+I64_BINOP_I(and, And)
+I64_BINOP_I(or, Or)
+I64_BINOP_I(xor, Xor)
+// clang-format on
+
+#undef I64_BINOP_I
+
 #define I64_SHIFTOP(name, instruction)                                         \
   void LiftoffAssembler::emit_i64_##name(LiftoffRegister dst,                  \
                                          LiftoffRegister src, Register amount, \
@@ -712,7 +798,7 @@ void LiftoffAssembler::emit_f32_max(DoubleRegister dst, DoubleRegister lhs,
 
 void LiftoffAssembler::emit_f32_copysign(DoubleRegister dst, DoubleRegister lhs,
                                          DoubleRegister rhs) {
-  BAILOUT("f32_copysign");
+  bailout(kComplexOperation, "f32_copysign");
 }
 
 void LiftoffAssembler::emit_f64_min(DoubleRegister dst, DoubleRegister lhs,
@@ -739,7 +825,7 @@ void LiftoffAssembler::emit_f64_max(DoubleRegister dst, DoubleRegister lhs,
 
 void LiftoffAssembler::emit_f64_copysign(DoubleRegister dst, DoubleRegister lhs,
                                          DoubleRegister rhs) {
-  BAILOUT("f64_copysign");
+  bailout(kComplexOperation, "f64_copysign");
 }
 
 #define FP_BINOP(name, instruction)                                          \
@@ -980,26 +1066,26 @@ bool LiftoffAssembler::emit_type_conversion(WasmOpcode opcode,
 }
 
 void LiftoffAssembler::emit_i32_signextend_i8(Register dst, Register src) {
-  BAILOUT("emit_i32_signextend_i8");
+  bailout(kComplexOperation, "i32_signextend_i8");
 }
 
 void LiftoffAssembler::emit_i32_signextend_i16(Register dst, Register src) {
-  BAILOUT("emit_i32_signextend_i16");
+  bailout(kComplexOperation, "i32_signextend_i16");
 }
 
 void LiftoffAssembler::emit_i64_signextend_i8(LiftoffRegister dst,
                                               LiftoffRegister src) {
-  BAILOUT("emit_i64_signextend_i8");
+  bailout(kComplexOperation, "i64_signextend_i8");
 }
 
 void LiftoffAssembler::emit_i64_signextend_i16(LiftoffRegister dst,
                                                LiftoffRegister src) {
-  BAILOUT("emit_i64_signextend_i16");
+  bailout(kComplexOperation, "i64_signextend_i16");
 }
 
 void LiftoffAssembler::emit_i64_signextend_i32(LiftoffRegister dst,
                                                LiftoffRegister src) {
-  BAILOUT("emit_i64_signextend_i32");
+  bailout(kComplexOperation, "i64_signextend_i32");
 }
 
 void LiftoffAssembler::emit_jump(Label* label) {
@@ -1066,29 +1152,29 @@ void LiftoffAssembler::emit_i64_set_cond(Condition cond, Register dst,
 
 namespace liftoff {
 
-inline FPUCondition ConditionToConditionCmpFPU(bool& predicate,
-                                               Condition condition) {
+inline FPUCondition ConditionToConditionCmpFPU(Condition condition,
+                                               bool* predicate) {
   switch (condition) {
     case kEqual:
-      predicate = true;
+      *predicate = true;
       return EQ;
     case kUnequal:
-      predicate = false;
+      *predicate = false;
       return EQ;
     case kUnsignedLessThan:
-      predicate = true;
+      *predicate = true;
       return OLT;
     case kUnsignedGreaterEqual:
-      predicate = false;
+      *predicate = false;
       return OLT;
     case kUnsignedLessEqual:
-      predicate = true;
+      *predicate = true;
       return OLE;
     case kUnsignedGreaterThan:
-      predicate = false;
+      *predicate = false;
       return OLE;
     default:
-      predicate = true;
+      *predicate = true;
       break;
   }
   UNREACHABLE();
@@ -1114,7 +1200,7 @@ void LiftoffAssembler::emit_f32_set_cond(Condition cond, Register dst,
 
   TurboAssembler::li(dst, 1);
   bool predicate;
-  FPUCondition fcond = liftoff::ConditionToConditionCmpFPU(predicate, cond);
+  FPUCondition fcond = liftoff::ConditionToConditionCmpFPU(cond, &predicate);
   TurboAssembler::CompareF32(fcond, lhs, rhs);
   if (predicate) {
     TurboAssembler::LoadZeroIfNotFPUCondition(dst);
@@ -1143,7 +1229,7 @@ void LiftoffAssembler::emit_f64_set_cond(Condition cond, Register dst,
 
   TurboAssembler::li(dst, 1);
   bool predicate;
-  FPUCondition fcond = liftoff::ConditionToConditionCmpFPU(predicate, cond);
+  FPUCondition fcond = liftoff::ConditionToConditionCmpFPU(cond, &predicate);
   TurboAssembler::CompareF64(fcond, lhs, rhs);
   if (predicate) {
     TurboAssembler::LoadZeroIfNotFPUCondition(dst);
@@ -1320,7 +1406,5 @@ void LiftoffStackSlots::Construct() {
 }  // namespace wasm
 }  // namespace internal
 }  // namespace v8
-
-#undef BAILOUT
 
 #endif  // V8_WASM_BASELINE_MIPS64_LIFTOFF_ASSEMBLER_MIPS64_H_

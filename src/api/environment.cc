@@ -1,4 +1,3 @@
-#include "env.h"
 #include "node.h"
 #include "node_context_data.h"
 #include "node_errors.h"
@@ -8,19 +7,17 @@
 #include "node_v8_platform-inl.h"
 #include "uv.h"
 
-#ifdef NODE_ENABLE_VTUNE_PROFILING
-#include "../deps/v8/src/third_party/vtune/v8-vtune.h"
-#endif
-
 namespace node {
+using errors::TryCatchScope;
+using v8::Array;
 using v8::Context;
 using v8::EscapableHandleScope;
+using v8::FinalizationGroup;
 using v8::Function;
 using v8::HandleScope;
 using v8::Isolate;
 using v8::Local;
 using v8::MaybeLocal;
-using v8::Message;
 using v8::MicrotasksPolicy;
 using v8::Null;
 using v8::Object;
@@ -45,11 +42,79 @@ static bool ShouldAbortOnUncaughtException(Isolate* isolate) {
          !env->inside_should_not_abort_on_uncaught_scope();
 }
 
+static MaybeLocal<Value> PrepareStackTraceCallback(Local<Context> context,
+                                      Local<Value> exception,
+                                      Local<Array> trace) {
+  Environment* env = Environment::GetCurrent(context);
+  if (env == nullptr) {
+    MaybeLocal<String> s = exception->ToString(context);
+    return s.IsEmpty() ?
+      MaybeLocal<Value>() :
+      MaybeLocal<Value>(s.ToLocalChecked());
+  }
+  Local<Function> prepare = env->prepare_stack_trace_callback();
+  if (prepare.IsEmpty()) {
+    MaybeLocal<String> s = exception->ToString(context);
+    return s.IsEmpty() ?
+      MaybeLocal<Value>() :
+      MaybeLocal<Value>(s.ToLocalChecked());
+  }
+  Local<Value> args[] = {
+      context->Global(),
+      exception,
+      trace,
+  };
+  // This TryCatch + Rethrow is required by V8 due to details around exception
+  // handling there. For C++ callbacks, V8 expects a scheduled exception (which
+  // is what ReThrow gives us). Just returning the empty MaybeLocal would leave
+  // us with a pending exception.
+  TryCatchScope try_catch(env);
+  MaybeLocal<Value> result = prepare->Call(
+      context, Undefined(env->isolate()), arraysize(args), args);
+  if (try_catch.HasCaught() && !try_catch.HasTerminated()) {
+    try_catch.ReThrow();
+  }
+  return result;
+}
+
+static void HostCleanupFinalizationGroupCallback(
+    Local<Context> context, Local<FinalizationGroup> group) {
+  Environment* env = Environment::GetCurrent(context);
+  if (env == nullptr) {
+    return;
+  }
+  env->RegisterFinalizationGroupForCleanup(group);
+}
+
 void* NodeArrayBufferAllocator::Allocate(size_t size) {
+  void* ret;
   if (zero_fill_field_ || per_process::cli_options->zero_fill_all_buffers)
-    return UncheckedCalloc(size);
+    ret = UncheckedCalloc(size);
   else
-    return UncheckedMalloc(size);
+    ret = UncheckedMalloc(size);
+  if (LIKELY(ret != nullptr))
+    total_mem_usage_.fetch_add(size, std::memory_order_relaxed);
+  return ret;
+}
+
+void* NodeArrayBufferAllocator::AllocateUninitialized(size_t size) {
+  void* ret = node::UncheckedMalloc(size);
+  if (LIKELY(ret != nullptr))
+    total_mem_usage_.fetch_add(size, std::memory_order_relaxed);
+  return ret;
+}
+
+void* NodeArrayBufferAllocator::Reallocate(
+    void* data, size_t old_size, size_t size) {
+  void* ret = UncheckedRealloc<char>(static_cast<char*>(data), size);
+  if (LIKELY(ret != nullptr) || UNLIKELY(size == 0))
+    total_mem_usage_.fetch_add(size - old_size, std::memory_order_relaxed);
+  return ret;
+}
+
+void NodeArrayBufferAllocator::Free(void* data, size_t size) {
+  total_mem_usage_.fetch_sub(size, std::memory_order_relaxed);
+  free(data);
 }
 
 DebuggingArrayBufferAllocator::~DebuggingArrayBufferAllocator() {
@@ -99,11 +164,13 @@ void* DebuggingArrayBufferAllocator::Reallocate(void* data,
 
 void DebuggingArrayBufferAllocator::RegisterPointer(void* data, size_t size) {
   Mutex::ScopedLock lock(mutex_);
+  NodeArrayBufferAllocator::RegisterPointer(data, size);
   RegisterPointerInternal(data, size);
 }
 
 void DebuggingArrayBufferAllocator::UnregisterPointer(void* data, size_t size) {
   Mutex::ScopedLock lock(mutex_);
+  NodeArrayBufferAllocator::UnregisterPointer(data, size);
   UnregisterPointerInternal(data, size);
 }
 
@@ -143,46 +210,68 @@ void FreeArrayBufferAllocator(ArrayBufferAllocator* allocator) {
 }
 
 void SetIsolateCreateParamsForNode(Isolate::CreateParams* params) {
-  const uint64_t total_memory = uv_get_total_memory();
+  const uint64_t constrained_memory = uv_get_constrained_memory();
+  const uint64_t total_memory = constrained_memory > 0 ?
+      std::min(uv_get_total_memory(), constrained_memory) :
+      uv_get_total_memory();
   if (total_memory > 0) {
     // V8 defaults to 700MB or 1.4GB on 32 and 64 bit platforms respectively.
     // This default is based on browser use-cases. Tell V8 to configure the
     // heap based on the actual physical memory.
     params->constraints.ConfigureDefaults(total_memory, 0);
   }
-
-#ifdef NODE_ENABLE_VTUNE_PROFILING
-  params->code_event_handler = vTune::GetVtuneCodeEventHandler();
-#endif
 }
 
-void SetIsolateUpForNode(v8::Isolate* isolate, IsolateSettingCategories cat) {
-  switch (cat) {
-    case IsolateSettingCategories::kErrorHandlers:
-      isolate->AddMessageListenerWithErrorLevel(
-          errors::PerIsolateMessageListener,
-          Isolate::MessageErrorLevel::kMessageError |
-              Isolate::MessageErrorLevel::kMessageWarning);
-      isolate->SetAbortOnUncaughtExceptionCallback(
-          ShouldAbortOnUncaughtException);
-      isolate->SetFatalErrorHandler(OnFatalError);
-      break;
-    case IsolateSettingCategories::kMisc:
-      isolate->SetMicrotasksPolicy(MicrotasksPolicy::kExplicit);
-      isolate->SetAllowWasmCodeGenerationCallback(
-          AllowWasmCodeGenerationCallback);
-      isolate->SetPromiseRejectCallback(task_queue::PromiseRejectCallback);
-      v8::CpuProfiler::UseDetailedSourcePositionsForProfiling(isolate);
-      break;
-    default:
-      UNREACHABLE();
-      break;
-  }
+void SetIsolateErrorHandlers(v8::Isolate* isolate, const IsolateSettings& s) {
+  if (s.flags & MESSAGE_LISTENER_WITH_ERROR_LEVEL)
+    isolate->AddMessageListenerWithErrorLevel(
+            errors::PerIsolateMessageListener,
+            Isolate::MessageErrorLevel::kMessageError |
+                Isolate::MessageErrorLevel::kMessageWarning);
+
+  auto* abort_callback = s.should_abort_on_uncaught_exception_callback ?
+      s.should_abort_on_uncaught_exception_callback :
+      ShouldAbortOnUncaughtException;
+  isolate->SetAbortOnUncaughtExceptionCallback(abort_callback);
+
+  auto* fatal_error_cb = s.fatal_error_callback ?
+      s.fatal_error_callback : OnFatalError;
+  isolate->SetFatalErrorHandler(fatal_error_cb);
+
+  auto* prepare_stack_trace_cb = s.prepare_stack_trace_callback ?
+      s.prepare_stack_trace_callback : PrepareStackTraceCallback;
+  isolate->SetPrepareStackTraceCallback(prepare_stack_trace_cb);
+}
+
+void SetIsolateMiscHandlers(v8::Isolate* isolate, const IsolateSettings& s) {
+  isolate->SetMicrotasksPolicy(s.policy);
+
+  auto* allow_wasm_codegen_cb = s.allow_wasm_code_generation_callback ?
+    s.allow_wasm_code_generation_callback : AllowWasmCodeGenerationCallback;
+  isolate->SetAllowWasmCodeGenerationCallback(allow_wasm_codegen_cb);
+
+  auto* promise_reject_cb = s.promise_reject_callback ?
+    s.promise_reject_callback : task_queue::PromiseRejectCallback;
+  isolate->SetPromiseRejectCallback(promise_reject_cb);
+
+  auto* host_cleanup_cb = s.host_cleanup_finalization_group_callback ?
+    s.host_cleanup_finalization_group_callback :
+    HostCleanupFinalizationGroupCallback;
+  isolate->SetHostCleanupFinalizationGroupCallback(host_cleanup_cb);
+
+  if (s.flags & DETAILED_SOURCE_POSITIONS_FOR_PROFILING)
+    v8::CpuProfiler::UseDetailedSourcePositionsForProfiling(isolate);
+}
+
+void SetIsolateUpForNode(v8::Isolate* isolate,
+                         const IsolateSettings& settings) {
+  SetIsolateErrorHandlers(isolate, settings);
+  SetIsolateMiscHandlers(isolate, settings);
 }
 
 void SetIsolateUpForNode(v8::Isolate* isolate) {
-  SetIsolateUpForNode(isolate, IsolateSettingCategories::kErrorHandlers);
-  SetIsolateUpForNode(isolate, IsolateSettingCategories::kMisc);
+  IsolateSettings settings;
+  SetIsolateUpForNode(isolate, settings);
 }
 
 Isolate* NewIsolate(ArrayBufferAllocator* allocator, uv_loop_t* event_loop) {
@@ -216,6 +305,14 @@ Isolate* NewIsolate(ArrayBufferAllocator* allocator,
   return NewIsolate(&params, event_loop, platform);
 }
 
+Isolate* NewIsolate(std::shared_ptr<ArrayBufferAllocator> allocator,
+                    uv_loop_t* event_loop,
+                    MultiIsolatePlatform* platform) {
+  Isolate::CreateParams params;
+  if (allocator) params.array_buffer_allocator_shared = allocator;
+  return NewIsolate(&params, event_loop, platform);
+}
+
 IsolateData* CreateIsolateData(Isolate* isolate,
                                uv_loop_t* loop,
                                MultiIsolatePlatform* platform,
@@ -244,12 +341,13 @@ Environment* CreateEnvironment(IsolateData* isolate_data,
   Environment* env = new Environment(
       isolate_data,
       context,
+      args,
+      exec_args,
       static_cast<Environment::Flags>(Environment::kIsMainThread |
                                       Environment::kOwnsProcessState |
                                       Environment::kOwnsInspector));
   env->InitializeLibuv(per_process::v8_is_profiling);
-  env->ProcessCliArgs(args, exec_args);
-  if (RunBootstrapping(env).IsEmpty()) {
+  if (env->RunBootstrapping().IsEmpty()) {
     return nullptr;
   }
 
@@ -288,11 +386,6 @@ MultiIsolatePlatform* CreatePlatform(
   return new NodePlatform(thread_pool_size, tracing_controller);
 }
 
-MultiIsolatePlatform* InitializeV8Platform(int thread_pool_size) {
-  per_process::v8_platform.Initialize(thread_pool_size);
-  return per_process::v8_platform.Platform();
-}
-
 void FreePlatform(MultiIsolatePlatform* platform) {
   delete platform;
 }
@@ -317,10 +410,53 @@ MaybeLocal<Object> GetPerContextExports(Local<Context> context) {
   return handle_scope.Escape(exports);
 }
 
+// Any initialization logic should be performed in
+// InitializeContext, because embedders don't necessarily
+// call NewContext and so they will experience breakages.
 Local<Context> NewContext(Isolate* isolate,
                           Local<ObjectTemplate> object_template) {
   auto context = Context::New(isolate, nullptr, object_template);
   if (context.IsEmpty()) return context;
+
+  if (!InitializeContext(context)) {
+    return Local<Context>();
+  }
+
+  return context;
+}
+
+// This runs at runtime, regardless of whether the context
+// is created from a snapshot.
+void InitializeContextRuntime(Local<Context> context) {
+  Isolate* isolate = context->GetIsolate();
+  HandleScope handle_scope(isolate);
+
+  // Delete `Intl.v8BreakIterator`
+  // https://github.com/nodejs/node/issues/14909
+  Local<String> intl_string = FIXED_ONE_BYTE_STRING(isolate, "Intl");
+  Local<String> break_iter_string =
+    FIXED_ONE_BYTE_STRING(isolate, "v8BreakIterator");
+  Local<Value> intl_v;
+  if (context->Global()->Get(context, intl_string).ToLocal(&intl_v) &&
+      intl_v->IsObject()) {
+    Local<Object> intl = intl_v.As<Object>();
+    intl->Delete(context, break_iter_string).FromJust();
+  }
+
+  // Delete `Atomics.wake`
+  // https://github.com/nodejs/node/issues/21219
+  Local<String> atomics_string = FIXED_ONE_BYTE_STRING(isolate, "Atomics");
+  Local<String> wake_string = FIXED_ONE_BYTE_STRING(isolate, "wake");
+  Local<Value> atomics_v;
+  if (context->Global()->Get(context, atomics_string).ToLocal(&atomics_v) &&
+      atomics_v->IsObject()) {
+    Local<Object> atomics = atomics_v.As<Object>();
+    atomics->Delete(context, wake_string).FromJust();
+  }
+}
+
+bool InitializeContextForSnapshot(Local<Context> context) {
+  Isolate* isolate = context->GetIsolate();
   HandleScope handle_scope(isolate);
 
   context->SetEmbedderData(ContextEmbedderIndex::kAllowWasmCodeGeneration,
@@ -341,11 +477,10 @@ Local<Context> NewContext(Isolate* isolate,
     if (!primordials->SetPrototype(context, Null(isolate)).FromJust() ||
         !GetPerContextExports(context).ToLocal(&exports) ||
         !exports->Set(context, primordials_string, primordials).FromJust()) {
-      return Local<Context>();
+      return false;
     }
 
     static const char* context_files[] = {"internal/per_context/primordials",
-                                          "internal/per_context/setup",
                                           "internal/per_context/domexception",
                                           nullptr};
 
@@ -357,7 +492,7 @@ Local<Context> NewContext(Isolate* isolate,
           native_module::NativeModuleEnv::LookupAndCompile(
               context, *module, &parameters, nullptr);
       if (maybe_fn.IsEmpty()) {
-        return Local<Context>();
+        return false;
       }
       Local<Function> fn = maybe_fn.ToLocalChecked();
       MaybeLocal<Value> result =
@@ -366,12 +501,21 @@ Local<Context> NewContext(Isolate* isolate,
       // Execution failed during context creation.
       // TODO(joyeecheung): deprecate this signature and return a MaybeLocal.
       if (result.IsEmpty()) {
-        return Local<Context>();
+        return false;
       }
     }
   }
 
-  return context;
+  return true;
+}
+
+bool InitializeContext(Local<Context> context) {
+  if (!InitializeContextForSnapshot(context)) {
+    return false;
+  }
+
+  InitializeContextRuntime(context);
+  return true;
 }
 
 uv_loop_t* GetCurrentEventLoop(Isolate* isolate) {
@@ -381,6 +525,34 @@ uv_loop_t* GetCurrentEventLoop(Isolate* isolate) {
   Environment* env = Environment::GetCurrent(context);
   if (env == nullptr) return nullptr;
   return env->event_loop();
+}
+
+void AddLinkedBinding(Environment* env, const node_module& mod) {
+  CHECK_NOT_NULL(env);
+  Mutex::ScopedLock lock(env->extra_linked_bindings_mutex());
+
+  node_module* prev_head = env->extra_linked_bindings_head();
+  env->extra_linked_bindings()->push_back(mod);
+  if (prev_head != nullptr)
+    prev_head->nm_link = &env->extra_linked_bindings()->back();
+}
+
+void AddLinkedBinding(Environment* env,
+                      const char* name,
+                      addon_context_register_func fn,
+                      void* priv) {
+  node_module mod = {
+    NODE_MODULE_VERSION,
+    NM_F_LINKED,
+    nullptr,  // nm_dso_handle
+    nullptr,  // nm_filename
+    nullptr,  // nm_register_func
+    fn,
+    name,
+    priv,
+    nullptr   // nm_link
+  };
+  AddLinkedBinding(env, mod);
 }
 
 }  // namespace node

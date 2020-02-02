@@ -1,5 +1,4 @@
-// Flags: --experimental-modules --loader ./test/fixtures/es-module-loaders/loader-shared-dep.mjs
-/* eslint-disable node-core/required-modules */
+// Flags: --experimental-loader ./test/fixtures/es-module-loaders/loader-shared-dep.mjs
 import { createRequire } from '../common/index.mjs';
 
 import assert from 'assert';

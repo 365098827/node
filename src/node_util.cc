@@ -1,5 +1,5 @@
 #include "node_errors.h"
-#include "util.h"
+#include "util-inl.h"
 #include "base_object-inl.h"
 
 namespace node {
@@ -58,6 +58,16 @@ static void GetOwnNonIndexProperties(
   args.GetReturnValue().Set(properties);
 }
 
+static void GetConstructorName(
+    const FunctionCallbackInfo<Value>& args) {
+  CHECK(args[0]->IsObject());
+
+  Local<Object> object = args[0].As<Object>();
+  Local<String> name = object->GetConstructorName();
+
+  args.GetReturnValue().Set(name);
+}
+
 static void GetPromiseDetails(const FunctionCallbackInfo<Value>& args) {
   // Return undefined if it's not a Promise.
   if (!args[0]->IsPromise())
@@ -83,13 +93,22 @@ static void GetProxyDetails(const FunctionCallbackInfo<Value>& args) {
 
   Local<Proxy> proxy = args[0].As<Proxy>();
 
-  Local<Value> ret[] = {
-    proxy->GetTarget(),
-    proxy->GetHandler()
-  };
+  // TODO(BridgeAR): Remove the length check as soon as we prohibit access to
+  // the util binding layer. It's accessed in the wild and `esm` would break in
+  // case the check is removed.
+  if (args.Length() == 1 || args[1]->IsTrue()) {
+    Local<Value> ret[] = {
+      proxy->GetTarget(),
+      proxy->GetHandler()
+    };
 
-  args.GetReturnValue().Set(
-      Array::New(args.GetIsolate(), ret, arraysize(ret)));
+    args.GetReturnValue().Set(
+        Array::New(args.GetIsolate(), ret, arraysize(ret)));
+  } else {
+    Local<Value> ret = proxy->GetTarget();
+
+    args.GetReturnValue().Set(ret);
+  }
 }
 
 static void PreviewEntries(const FunctionCallbackInfo<Value>& args) {
@@ -111,12 +130,6 @@ static void PreviewEntries(const FunctionCallbackInfo<Value>& args) {
   };
   return args.GetReturnValue().Set(
       Array::New(env->isolate(), ret, arraysize(ret)));
-}
-
-// Side effect-free stringification that will never throw exceptions.
-static void SafeToString(const FunctionCallbackInfo<Value>& args) {
-  auto context = args.GetIsolate()->GetCurrentContext();
-  args.GetReturnValue().Set(args[0]->ToDetailString(context).ToLocalChecked());
 }
 
 inline Local<Private> IndexToPrivateSymbol(Environment* env, uint32_t index) {
@@ -157,6 +170,12 @@ static void SetHiddenValue(const FunctionCallbackInfo<Value>& args) {
   args.GetReturnValue().Set(maybe_value.FromJust());
 }
 
+static void Sleep(const FunctionCallbackInfo<Value>& args) {
+  CHECK(args[0]->IsUint32());
+  uint32_t msec = args[0].As<Uint32>()->Value();
+  uv_sleep(msec);
+}
+
 void ArrayBufferViewHasBuffer(const FunctionCallbackInfo<Value>& args) {
   CHECK(args[0]->IsArrayBufferView());
   args.GetReturnValue().Set(args[0].As<ArrayBufferView>()->HasBuffer());
@@ -185,12 +204,28 @@ class WeakReference : public BaseObject {
       args.GetReturnValue().Set(weak_ref->target_.Get(isolate));
   }
 
+  static void IncRef(const FunctionCallbackInfo<Value>& args) {
+    WeakReference* weak_ref = Unwrap<WeakReference>(args.Holder());
+    weak_ref->reference_count_++;
+    if (weak_ref->target_.IsEmpty()) return;
+    if (weak_ref->reference_count_ == 1) weak_ref->target_.ClearWeak();
+  }
+
+  static void DecRef(const FunctionCallbackInfo<Value>& args) {
+    WeakReference* weak_ref = Unwrap<WeakReference>(args.Holder());
+    CHECK_GE(weak_ref->reference_count_, 1);
+    weak_ref->reference_count_--;
+    if (weak_ref->target_.IsEmpty()) return;
+    if (weak_ref->reference_count_ == 0) weak_ref->target_.SetWeak();
+  }
+
   SET_MEMORY_INFO_NAME(WeakReference)
   SET_SELF_SIZE(WeakReference)
   SET_NO_MEMORY_INFO()
 
  private:
   Global<Object> target_;
+  uint64_t reference_count_ = 0;
 };
 
 static void GuessHandleType(const FunctionCallbackInfo<Value>& args) {
@@ -258,10 +293,11 @@ void Initialize(Local<Object> target,
   env->SetMethod(target, "setHiddenValue", SetHiddenValue);
   env->SetMethodNoSideEffect(target, "getPromiseDetails", GetPromiseDetails);
   env->SetMethodNoSideEffect(target, "getProxyDetails", GetProxyDetails);
-  env->SetMethodNoSideEffect(target, "safeToString", SafeToString);
   env->SetMethodNoSideEffect(target, "previewEntries", PreviewEntries);
   env->SetMethodNoSideEffect(target, "getOwnNonIndexProperties",
                                      GetOwnNonIndexProperties);
+  env->SetMethodNoSideEffect(target, "getConstructorName", GetConstructorName);
+  env->SetMethod(target, "sleep", Sleep);
 
   env->SetMethod(target, "arrayBufferViewHasBuffer", ArrayBufferViewHasBuffer);
   Local<Object> constants = Object::New(env->isolate());
@@ -290,6 +326,8 @@ void Initialize(Local<Object> target,
   weak_ref->InstanceTemplate()->SetInternalFieldCount(1);
   weak_ref->SetClassName(weak_ref_string);
   env->SetProtoMethod(weak_ref, "get", WeakReference::Get);
+  env->SetProtoMethod(weak_ref, "incRef", WeakReference::IncRef);
+  env->SetProtoMethod(weak_ref, "decRef", WeakReference::DecRef);
   target->Set(context, weak_ref_string,
               weak_ref->GetFunction(context).ToLocalChecked()).Check();
 

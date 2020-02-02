@@ -4,7 +4,7 @@
 
 #include "src/interpreter/bytecode-array-builder.h"
 
-#include "src/globals.h"
+#include "src/common/globals.h"
 #include "src/interpreter/bytecode-array-writer.h"
 #include "src/interpreter/bytecode-jump-table.h"
 #include "src/interpreter/bytecode-label.h"
@@ -12,7 +12,7 @@
 #include "src/interpreter/bytecode-register-optimizer.h"
 #include "src/interpreter/bytecode-source-info.h"
 #include "src/interpreter/interpreter-intrinsics.h"
-#include "src/objects-inl.h"
+#include "src/objects/objects-inl.h"
 #include "src/objects/smi.h"
 
 namespace v8 {
@@ -23,7 +23,8 @@ class RegisterTransferWriter final
     : public NON_EXPORTED_BASE(BytecodeRegisterOptimizer::BytecodeWriter),
       public NON_EXPORTED_BASE(ZoneObject) {
  public:
-  RegisterTransferWriter(BytecodeArrayBuilder* builder) : builder_(builder) {}
+  explicit RegisterTransferWriter(BytecodeArrayBuilder* builder)
+      : builder_(builder) {}
   ~RegisterTransferWriter() override = default;
 
   void EmitLdar(Register input) override { builder_->OutputLdarRaw(input); }
@@ -96,6 +97,19 @@ Handle<BytecodeArray> BytecodeArrayBuilder::ToBytecodeArray(Isolate* isolate) {
       handler_table_builder()->ToHandlerTable(isolate);
   return bytecode_array_writer_.ToBytecodeArray(
       isolate, register_count, parameter_count(), handler_table);
+}
+
+#ifdef DEBUG
+int BytecodeArrayBuilder::CheckBytecodeMatches(Handle<BytecodeArray> bytecode) {
+  return bytecode_array_writer_.CheckBytecodeMatches(bytecode);
+}
+#endif
+
+Handle<ByteArray> BytecodeArrayBuilder::ToSourcePositionTable(
+    Isolate* isolate) {
+  DCHECK(RemainderOfBlockIsDead());
+
+  return bytecode_array_writer_.ToSourcePositionTable(isolate);
 }
 
 BytecodeSourceInfo BytecodeArrayBuilder::CurrentSourcePosition(
@@ -406,40 +420,40 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::BinaryOperationSmiLiteral(
     Token::Value op, Smi literal, int feedback_slot) {
   switch (op) {
     case Token::Value::ADD:
-      OutputAddSmi(literal->value(), feedback_slot);
+      OutputAddSmi(literal.value(), feedback_slot);
       break;
     case Token::Value::SUB:
-      OutputSubSmi(literal->value(), feedback_slot);
+      OutputSubSmi(literal.value(), feedback_slot);
       break;
     case Token::Value::MUL:
-      OutputMulSmi(literal->value(), feedback_slot);
+      OutputMulSmi(literal.value(), feedback_slot);
       break;
     case Token::Value::DIV:
-      OutputDivSmi(literal->value(), feedback_slot);
+      OutputDivSmi(literal.value(), feedback_slot);
       break;
     case Token::Value::MOD:
-      OutputModSmi(literal->value(), feedback_slot);
+      OutputModSmi(literal.value(), feedback_slot);
       break;
     case Token::Value::EXP:
-      OutputExpSmi(literal->value(), feedback_slot);
+      OutputExpSmi(literal.value(), feedback_slot);
       break;
     case Token::Value::BIT_OR:
-      OutputBitwiseOrSmi(literal->value(), feedback_slot);
+      OutputBitwiseOrSmi(literal.value(), feedback_slot);
       break;
     case Token::Value::BIT_XOR:
-      OutputBitwiseXorSmi(literal->value(), feedback_slot);
+      OutputBitwiseXorSmi(literal.value(), feedback_slot);
       break;
     case Token::Value::BIT_AND:
-      OutputBitwiseAndSmi(literal->value(), feedback_slot);
+      OutputBitwiseAndSmi(literal.value(), feedback_slot);
       break;
     case Token::Value::SHL:
-      OutputShiftLeftSmi(literal->value(), feedback_slot);
+      OutputShiftLeftSmi(literal.value(), feedback_slot);
       break;
     case Token::Value::SAR:
-      OutputShiftRightSmi(literal->value(), feedback_slot);
+      OutputShiftRightSmi(literal.value(), feedback_slot);
       break;
     case Token::Value::SHR:
-      OutputShiftRightLogicalSmi(literal->value(), feedback_slot);
+      OutputShiftRightLogicalSmi(literal.value(), feedback_slot);
       break;
     default:
       UNREACHABLE();
@@ -573,7 +587,7 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::LoadConstantPoolEntry(
 }
 
 BytecodeArrayBuilder& BytecodeArrayBuilder::LoadLiteral(Smi smi) {
-  int32_t raw_smi = smi->value();
+  int32_t raw_smi = smi.value();
   if (raw_smi == 0) {
     OutputLdaZero();
   } else {
@@ -814,6 +828,12 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::LoadIteratorProperty(
     Register object, int feedback_slot) {
   size_t name_index = IteratorSymbolConstantPoolEntry();
   OutputLdaNamedProperty(object, name_index, feedback_slot);
+  return *this;
+}
+
+BytecodeArrayBuilder& BytecodeArrayBuilder::GetIterator(
+    Register object, int load_feedback_slot, int call_feedback_slot) {
+  OutputGetIterator(object, load_feedback_slot, call_feedback_slot);
   return *this;
 }
 
@@ -1156,6 +1176,13 @@ BytecodeArrayBuilder& BytecodeArrayBuilder::JumpIfUndefined(
     BytecodeLabel* label) {
   DCHECK(!label->is_bound());
   OutputJumpIfUndefined(label, 0);
+  return *this;
+}
+
+BytecodeArrayBuilder& BytecodeArrayBuilder::JumpIfUndefinedOrNull(
+    BytecodeLabel* label) {
+  DCHECK(!label->is_bound());
+  OutputJumpIfUndefinedOrNull(label, 0);
   return *this;
 }
 

@@ -5,15 +5,16 @@
 #ifndef V8_REGEXP_X64_REGEXP_MACRO_ASSEMBLER_X64_H_
 #define V8_REGEXP_X64_REGEXP_MACRO_ASSEMBLER_X64_H_
 
-#include "src/macro-assembler.h"
+#include "src/codegen/macro-assembler.h"
+#include "src/codegen/x64/assembler-x64.h"
 #include "src/regexp/regexp-macro-assembler.h"
-#include "src/x64/assembler-x64.h"
 #include "src/zone/zone-chunk-list.h"
 
 namespace v8 {
 namespace internal {
 
-class RegExpMacroAssemblerX64: public NativeRegExpMacroAssembler {
+class V8_EXPORT_PRIVATE RegExpMacroAssemblerX64
+    : public NativeRegExpMacroAssembler {
  public:
   RegExpMacroAssemblerX64(Isolate* isolate, Zone* zone, Mode mode,
                           int registers_to_save);
@@ -23,7 +24,7 @@ class RegExpMacroAssemblerX64: public NativeRegExpMacroAssembler {
   void AdvanceRegister(int reg, int by) override;
   void Backtrack() override;
   void Bind(Label* label) override;
-  void CheckAtStart(Label* on_at_start) override;
+  void CheckAtStart(int cp_offset, Label* on_at_start) override;
   void CheckCharacter(uint32_t c, Label* on_equal) override;
   void CheckCharacterAfterAnd(uint32_t c, uint32_t mask,
                               Label* on_equal) override;
@@ -59,9 +60,9 @@ class RegExpMacroAssemblerX64: public NativeRegExpMacroAssembler {
   void IfRegisterLT(int reg, int comparand, Label* if_lt) override;
   void IfRegisterEqPos(int reg, Label* if_eq) override;
   IrregexpImplementation Implementation() override;
-  void LoadCurrentCharacter(int cp_offset, Label* on_end_of_input,
-                            bool check_bounds = true,
-                            int characters = 1) override;
+  void LoadCurrentCharacterImpl(int cp_offset, Label* on_end_of_input,
+                                bool check_bounds, int characters,
+                                int eats_at_least) override;
   void PopCurrentPosition() override;
   void PopRegister(int register_index) override;
   void PushBacktrack(Label* label) override;
@@ -91,7 +92,7 @@ class RegExpMacroAssemblerX64: public NativeRegExpMacroAssembler {
   static const int kReturn_eip = kFramePointer + kSystemPointerSize;
   static const int kFrameAlign = kReturn_eip + kSystemPointerSize;
 
-#ifdef _WIN64
+#ifdef V8_TARGET_OS_WIN
   // Parameters (first four passed as registers, but with room on stack).
   // In Microsoft 64-bit Calling Convention, there is room on the callers
   // stack (before the return address) to spill parameter registers. We
@@ -130,7 +131,7 @@ class RegExpMacroAssemblerX64: public NativeRegExpMacroAssembler {
   static const int kIsolate = kDirectCall + kSystemPointerSize;
 #endif
 
-#ifdef _WIN64
+#ifdef V8_TARGET_OS_WIN
   // Microsoft calling convention has three callee-saved registers
   // (that we are using). We push these after the frame pointer.
   static const int kBackup_rsi = kFramePointer - kSystemPointerSize;

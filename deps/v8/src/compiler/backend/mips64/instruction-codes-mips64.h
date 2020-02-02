@@ -163,6 +163,7 @@ namespace compiler {
   V(Mips64StackClaim)                        \
   V(Mips64Seb)                               \
   V(Mips64Seh)                               \
+  V(Mips64Sync)                              \
   V(Mips64AssertEqual)                       \
   V(Mips64S128Zero)                          \
   V(Mips64I32x4Splat)                        \
@@ -188,12 +189,14 @@ namespace compiler {
   V(Mips64I32x4MinU)                         \
   V(Mips64F32x4Abs)                          \
   V(Mips64F32x4Neg)                          \
+  V(Mips64F32x4Sqrt)                          \
   V(Mips64F32x4RecipApprox)                  \
   V(Mips64F32x4RecipSqrtApprox)              \
   V(Mips64F32x4Add)                          \
   V(Mips64F32x4AddHoriz)                     \
   V(Mips64F32x4Sub)                          \
   V(Mips64F32x4Mul)                          \
+  V(Mips64F32x4Div)                          \
   V(Mips64F32x4Max)                          \
   V(Mips64F32x4Min)                          \
   V(Mips64F32x4Eq)                           \

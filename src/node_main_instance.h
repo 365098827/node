@@ -4,6 +4,8 @@
 #if defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 
 #include <cstddef>
+#include <memory>
+
 #include "node.h"
 #include "util.h"
 #include "uv.h"
@@ -15,14 +17,14 @@ namespace node {
 // We may be able to create an abstract class to reuse some of the routines.
 class NodeMainInstance {
  public:
-  // To create a main instance that does not own the isoalte,
+  // To create a main instance that does not own the isolate,
   // The caller needs to do:
   //
   //   Isolate* isolate = Isolate::Allocate();
   //   platform->RegisterIsolate(isolate, loop);
   //   isolate->Initialize(...);
   //   isolate->Enter();
-  //   NodeMainInstance* main_instance =
+  //   std::unique_ptr<NodeMainInstance> main_instance =
   //       NodeMainInstance::Create(isolate, loop, args, exec_args);
   //
   // When tearing it down:
@@ -33,11 +35,13 @@ class NodeMainInstance {
   //   platform->UnregisterIsolate(isolate);
   //
   // After calling Dispose() the main_instance is no longer accessible.
-  static NodeMainInstance* Create(v8::Isolate* isolate,
-                                  uv_loop_t* event_loop,
-                                  MultiIsolatePlatform* platform,
-                                  const std::vector<std::string>& args,
-                                  const std::vector<std::string>& exec_args);
+  static std::unique_ptr<NodeMainInstance> Create(
+      v8::Isolate* isolate,
+      uv_loop_t* event_loop,
+      MultiIsolatePlatform* platform,
+      const std::vector<std::string>& args,
+      const std::vector<std::string>& exec_args);
+
   void Dispose();
 
   // Create a main instance that owns the isolate
@@ -65,13 +69,12 @@ class NodeMainInstance {
   static v8::StartupData* GetEmbeddedSnapshotBlob();
 
   static const size_t kNodeContextIndex = 0;
-
- private:
   NodeMainInstance(const NodeMainInstance&) = delete;
   NodeMainInstance& operator=(const NodeMainInstance&) = delete;
   NodeMainInstance(NodeMainInstance&&) = delete;
   NodeMainInstance& operator=(NodeMainInstance&&) = delete;
 
+ private:
   NodeMainInstance(v8::Isolate* isolate,
                    uv_loop_t* event_loop,
                    MultiIsolatePlatform* platform,

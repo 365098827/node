@@ -5,12 +5,14 @@
 #ifndef V8_DEBUG_DEBUG_INTERFACE_H_
 #define V8_DEBUG_DEBUG_INTERFACE_H_
 
+#include <memory>
+
 #include "include/v8-inspector.h"
 #include "include/v8-util.h"
 #include "include/v8.h"
 
+#include "src/common/globals.h"
 #include "src/debug/interface-types.h"
-#include "src/globals.h"
 
 namespace v8 {
 
@@ -36,11 +38,11 @@ v8_inspector::V8Inspector* GetInspector(Isolate* isolate);
 
 // Schedule a debugger break to happen when function is called inside given
 // isolate.
-void SetBreakOnNextFunctionCall(Isolate* isolate);
+V8_EXPORT_PRIVATE void SetBreakOnNextFunctionCall(Isolate* isolate);
 
 // Remove scheduled debugger break in given isolate if it has not
 // happened yet.
-void ClearBreakOnNextFunctionCall(Isolate* isolate);
+V8_EXPORT_PRIVATE void ClearBreakOnNextFunctionCall(Isolate* isolate);
 
 /**
  * Returns array of internal properties specific to the value type. Result has
@@ -54,7 +56,14 @@ MaybeLocal<Array> GetInternalProperties(Isolate* isolate, Local<Value> value);
  * the following format: [<name>, <value>,...,<name>, <value>]. Result array
  * will be allocated in the current context.
  */
-MaybeLocal<Array> GetPrivateFields(Local<Context> context, Local<Object> value);
+V8_EXPORT_PRIVATE MaybeLocal<Array> GetPrivateFields(Local<Context> context,
+                                                     Local<Object> value);
+
+/**
+ * Forwards to v8::Object::CreationContext, but with special handling for
+ * JSGlobalProxy objects.
+ */
+Local<Context> GetCreationContext(Local<Object> value);
 
 enum ExceptionBreakState {
   NoBreakOnException = 0,
@@ -82,7 +91,7 @@ enum StepAction {
 
 void PrepareStep(Isolate* isolate, StepAction action);
 void ClearStepping(Isolate* isolate);
-void BreakRightNow(Isolate* isolate);
+V8_EXPORT_PRIVATE void BreakRightNow(Isolate* isolate);
 
 bool AllFramesOnStackAreBlackboxed(Isolate* isolate);
 
@@ -140,6 +149,7 @@ class V8_EXPORT_PRIVATE Script {
                        LiveEditResult* result) const;
   bool SetBreakpoint(v8::Local<v8::String> condition, debug::Location* location,
                      BreakpointId* id) const;
+  bool SetBreakpointOnScriptEntry(BreakpointId* id) const;
 };
 
 // Specialization for wasm Scripts.
@@ -149,6 +159,7 @@ class WasmScript : public Script {
 
   int NumFunctions() const;
   int NumImportedFunctions() const;
+  MemorySpan<const uint8_t> Bytecode() const;
 
   std::pair<int, int> GetFunctionRange(int function_index) const;
 
@@ -156,7 +167,9 @@ class WasmScript : public Script {
   uint32_t GetFunctionHash(int function_index);
 };
 
-void GetLoadedScripts(Isolate* isolate, PersistentValueVector<Script>& scripts);
+V8_EXPORT_PRIVATE void GetLoadedScripts(
+    Isolate* isolate,
+    PersistentValueVector<Script>& scripts);  // NOLINT(runtime/references)
 
 MaybeLocal<UnboundScript> CompileInspectorScript(Isolate* isolate,
                                                  Local<String> source);
@@ -184,7 +197,8 @@ class DebugDelegate {
   }
 };
 
-void SetDebugDelegate(Isolate* isolate, DebugDelegate* listener);
+V8_EXPORT_PRIVATE void SetDebugDelegate(Isolate* isolate,
+                                        DebugDelegate* listener);
 
 class AsyncEventDelegate {
  public:
@@ -368,7 +382,7 @@ class V8_EXPORT_PRIVATE TypeProfile {
   std::shared_ptr<i::TypeProfile> type_profile_;
 };
 
-class ScopeIterator {
+class V8_EXPORT_PRIVATE ScopeIterator {
  public:
   static std::unique_ptr<ScopeIterator> CreateForFunction(
       v8::Isolate* isolate, v8::Local<v8::Function> func);
@@ -407,7 +421,7 @@ class ScopeIterator {
   DISALLOW_COPY_AND_ASSIGN(ScopeIterator);
 };
 
-class StackTraceIterator {
+class V8_EXPORT_PRIVATE StackTraceIterator {
  public:
   static std::unique_ptr<StackTraceIterator> Create(Isolate* isolate,
                                                     int index = 0);
@@ -457,9 +471,15 @@ enum class NativeAccessorType {
 
 int64_t GetNextRandomInt64(v8::Isolate* isolate);
 
-v8::MaybeLocal<v8::Value> EvaluateGlobal(v8::Isolate* isolate,
-                                         v8::Local<v8::String> source,
-                                         bool throw_on_side_effect);
+enum class EvaluateGlobalMode {
+  kDefault,
+  kDisableBreaks,
+  kDisableBreaksAndThrowOnSideEffect
+};
+
+V8_EXPORT_PRIVATE v8::MaybeLocal<v8::Value> EvaluateGlobal(
+    v8::Isolate* isolate, v8::Local<v8::String> source,
+    EvaluateGlobalMode mode);
 
 int GetDebuggingId(v8::Local<v8::Function> function);
 
@@ -479,13 +499,13 @@ class PostponeInterruptsScope {
 
 class WeakMap : public v8::Object {
  public:
-  V8_WARN_UNUSED_RESULT v8::MaybeLocal<v8::Value> Get(
+  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT v8::MaybeLocal<v8::Value> Get(
       v8::Local<v8::Context> context, v8::Local<v8::Value> key);
-  V8_WARN_UNUSED_RESULT v8::MaybeLocal<WeakMap> Set(
+  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT v8::MaybeLocal<WeakMap> Set(
       v8::Local<v8::Context> context, v8::Local<v8::Value> key,
       v8::Local<v8::Value> value);
 
-  static Local<WeakMap> New(v8::Isolate* isolate);
+  V8_EXPORT_PRIVATE static Local<WeakMap> New(v8::Isolate* isolate);
   V8_INLINE static WeakMap* Cast(Value* obj);
 
  private:

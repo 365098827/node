@@ -6,19 +6,21 @@
 
 #include "src/ast/modules.h"
 #include "src/builtins/builtins-utils.h"
-#include "src/code-factory.h"
+#include "src/codegen/code-factory.h"
 #include "src/compiler/access-builder.h"
 #include "src/compiler/allocation-builder.h"
 #include "src/compiler/js-graph.h"
+#include "src/compiler/js-heap-broker.h"
 #include "src/compiler/linkage.h"
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/node-properties.h"
 #include "src/compiler/operator-properties.h"
 #include "src/compiler/type-cache.h"
 #include "src/compiler/types.h"
-#include "src/objects-inl.h"
+#include "src/execution/protectors.h"
 #include "src/objects/js-generator.h"
 #include "src/objects/module-inl.h"
+#include "src/objects/objects-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -199,14 +201,14 @@ class JSBinopReduction final {
   void CheckInputsToString() {
     if (!left_type().Is(Type::String())) {
       Node* left_input =
-          graph()->NewNode(simplified()->CheckString(VectorSlotPair()), left(),
+          graph()->NewNode(simplified()->CheckString(FeedbackSource()), left(),
                            effect(), control());
       node_->ReplaceInput(0, left_input);
       update_effect(left_input);
     }
     if (!right_type().Is(Type::String())) {
       Node* right_input =
-          graph()->NewNode(simplified()->CheckString(VectorSlotPair()), right(),
+          graph()->NewNode(simplified()->CheckString(FeedbackSource()), right(),
                            effect(), control());
       node_->ReplaceInput(1, right_input);
       update_effect(right_input);
@@ -566,16 +568,17 @@ Reduction JSTypedLowering::ReduceJSAdd(Node* node) {
     Node* length =
         graph()->NewNode(simplified()->NumberAdd(), left_length, right_length);
 
-    CellRef string_length_protector(broker(),
-                                    factory()->string_length_protector());
-    if (string_length_protector.value().AsSmi() == Isolate::kProtectorValid) {
+    PropertyCellRef string_length_protector(
+        broker(), factory()->string_length_protector());
+    if (string_length_protector.value().AsSmi() ==
+        Protectors::kProtectorValid) {
       // We can just deoptimize if the {length} is out-of-bounds. Besides
       // generating a shorter code sequence than the version below, this
       // has the additional benefit of not holding on to the lazy {frame_state}
       // and thus potentially reduces the number of live ranges and allows for
       // more truncations.
       length = effect = graph()->NewNode(
-          simplified()->CheckBounds(VectorSlotPair()), length,
+          simplified()->CheckBounds(FeedbackSource()), length,
           jsgraph()->Constant(String::kMaxLength + 1), effect, control);
     } else {
       // Check if we would overflow the allowed maximum string length.
@@ -1319,7 +1322,7 @@ Reduction JSTypedLowering::ReduceJSLoadContext(Node* node) {
   for (size_t i = 0; i < access.depth(); ++i) {
     context = effect = graph()->NewNode(
         simplified()->LoadField(
-            AccessBuilder::ForContextSlot(Context::PREVIOUS_INDEX)),
+            AccessBuilder::ForContextSlotKnownPointer(Context::PREVIOUS_INDEX)),
         context, effect, control);
   }
   node->ReplaceInput(0, context);
@@ -1341,7 +1344,7 @@ Reduction JSTypedLowering::ReduceJSStoreContext(Node* node) {
   for (size_t i = 0; i < access.depth(); ++i) {
     context = effect = graph()->NewNode(
         simplified()->LoadField(
-            AccessBuilder::ForContextSlot(Context::PREVIOUS_INDEX)),
+            AccessBuilder::ForContextSlotKnownPointer(Context::PREVIOUS_INDEX)),
         context, effect, control);
   }
   node->ReplaceInput(0, context);
@@ -1364,20 +1367,21 @@ Node* JSTypedLowering::BuildGetModuleCell(Node* node) {
   Type module_type = NodeProperties::GetType(module);
 
   if (module_type.IsHeapConstant()) {
-    ModuleRef module_constant = module_type.AsHeapConstant()->Ref().AsModule();
-    CellRef cell_constant = module_constant.GetCell(cell_index);
-    return jsgraph()->Constant(cell_constant);
+    SourceTextModuleRef module_constant =
+        module_type.AsHeapConstant()->Ref().AsSourceTextModule();
+    base::Optional<CellRef> cell_constant = module_constant.GetCell(cell_index);
+    if (cell_constant.has_value()) return jsgraph()->Constant(*cell_constant);
   }
 
   FieldAccess field_access;
   int index;
-  if (ModuleDescriptor::GetCellIndexKind(cell_index) ==
-      ModuleDescriptor::kExport) {
+  if (SourceTextModuleDescriptor::GetCellIndexKind(cell_index) ==
+      SourceTextModuleDescriptor::kExport) {
     field_access = AccessBuilder::ForModuleRegularExports();
     index = cell_index - 1;
   } else {
-    DCHECK_EQ(ModuleDescriptor::GetCellIndexKind(cell_index),
-              ModuleDescriptor::kImport);
+    DCHECK_EQ(SourceTextModuleDescriptor::GetCellIndexKind(cell_index),
+              SourceTextModuleDescriptor::kImport);
     field_access = AccessBuilder::ForModuleRegularImports();
     index = -cell_index - 1;
   }
@@ -1408,9 +1412,9 @@ Reduction JSTypedLowering::ReduceJSStoreModule(Node* node) {
   Node* effect = NodeProperties::GetEffectInput(node);
   Node* control = NodeProperties::GetControlInput(node);
   Node* value = NodeProperties::GetValueInput(node, 1);
-  DCHECK_EQ(
-      ModuleDescriptor::GetCellIndexKind(OpParameter<int32_t>(node->op())),
-      ModuleDescriptor::kExport);
+  DCHECK_EQ(SourceTextModuleDescriptor::GetCellIndexKind(
+                OpParameter<int32_t>(node->op())),
+            SourceTextModuleDescriptor::kExport);
 
   Node* cell = BuildGetModuleCell(node);
   if (cell->op()->EffectOutputCount() > 0) effect = cell;
@@ -1446,16 +1450,15 @@ void ReduceBuiltin(JSGraph* jsgraph, Node* node, int builtin_index, int arity,
 
   const bool is_construct = (node->opcode() == IrOpcode::kJSConstruct);
 
-  DCHECK(Builtins::HasCppImplementation(builtin_index));
-
   Node* target = NodeProperties::GetValueInput(node, 0);
   Node* new_target = is_construct
                          ? NodeProperties::GetValueInput(node, arity + 1)
                          : jsgraph->UndefinedConstant();
 
-  // API and CPP builtins are implemented in C++, and we can inline both.
-  // CPP builtins create a builtin exit frame, API builtins don't.
-  const bool has_builtin_exit_frame = Builtins::IsCpp(builtin_index);
+  // CPP builtins are implemented in C++, and we can inline it.
+  // CPP builtins create a builtin exit frame.
+  DCHECK(Builtins::IsCpp(builtin_index));
+  const bool has_builtin_exit_frame = true;
 
   Node* stub = jsgraph->CEntryStubConstant(1, kDontSaveFPRegs, kArgvOnStack,
                                            has_builtin_exit_frame);
@@ -1553,21 +1556,21 @@ Reduction JSTypedLowering::ReduceJSConstruct(Node* node) {
   if (target_type.IsHeapConstant() &&
       target_type.AsHeapConstant()->Ref().IsJSFunction()) {
     JSFunctionRef function = target_type.AsHeapConstant()->Ref().AsJSFunction();
-    SharedFunctionInfoRef shared = function.shared();
 
     // Only optimize [[Construct]] here if {function} is a Constructor.
     if (!function.map().is_constructor()) return NoChange();
 
-    CallDescriptor::Flags flags = CallDescriptor::kNeedsFrameState;
+    if (!function.serialized()) {
+      TRACE_BROKER_MISSING(broker(), "data for function " << function);
+      return NoChange();
+    }
 
     // Patch {node} to an indirect call via the {function}s construct stub.
-    bool use_builtin_construct_stub = shared.construct_as_builtin();
-
+    bool use_builtin_construct_stub = function.shared().construct_as_builtin();
     CodeRef code(broker(),
                  use_builtin_construct_stub
                      ? BUILTIN_CODE(isolate(), JSBuiltinsConstructStub)
                      : BUILTIN_CODE(isolate(), JSConstructStubGeneric));
-
     node->RemoveInput(arity + 1);
     node->InsertInput(graph()->zone(), 0, jsgraph()->Constant(code));
     node->InsertInput(graph()->zone(), 2, new_target);
@@ -1575,10 +1578,9 @@ Reduction JSTypedLowering::ReduceJSConstruct(Node* node) {
     node->InsertInput(graph()->zone(), 4, jsgraph()->UndefinedConstant());
     node->InsertInput(graph()->zone(), 5, jsgraph()->UndefinedConstant());
     NodeProperties::ChangeOp(
-        node,
-        common()->Call(Linkage::GetStubCallDescriptor(
-            graph()->zone(), ConstructStubDescriptor{}, 1 + arity, flags)));
-
+        node, common()->Call(Linkage::GetStubCallDescriptor(
+                  graph()->zone(), ConstructStubDescriptor{}, 1 + arity,
+                  CallDescriptor::kNeedsFrameState)));
     return Changed(node);
   }
 
@@ -1636,12 +1638,15 @@ Reduction JSTypedLowering::ReduceJSCall(Node* node) {
   if (target_type.IsHeapConstant() &&
       target_type.AsHeapConstant()->Ref().IsJSFunction()) {
     JSFunctionRef function = target_type.AsHeapConstant()->Ref().AsJSFunction();
-    SharedFunctionInfoRef shared = function.shared();
 
-    if (shared.HasBreakInfo()) {
-      // Do not inline the call if we need to check whether to break at entry.
+    if (!function.serialized()) {
+      TRACE_BROKER_MISSING(broker(), "data for function " << function);
       return NoChange();
     }
+    SharedFunctionInfoRef shared = function.shared();
+
+    // Do not inline the call if we need to check whether to break at entry.
+    if (shared.HasBreakInfo()) return NoChange();
 
     // Class constructors are callable, but [[Call]] will raise an exception.
     // See ES6 section 9.2.1 [[Call]] ( thisArgument, argumentsList ).
@@ -1651,7 +1656,8 @@ Reduction JSTypedLowering::ReduceJSCall(Node* node) {
     // require data from a foreign native context.
     if (is_sloppy(shared.language_mode()) && !shared.native() &&
         !receiver_type.Is(Type::Receiver())) {
-      if (!function.native_context().equals(broker()->native_context())) {
+      if (!function.native_context().equals(
+              broker()->target_native_context())) {
         return NoChange();
       }
       Node* global_proxy =
@@ -1720,8 +1726,7 @@ Reduction JSTypedLowering::ReduceJSCall(Node* node) {
             common()->Call(Linkage::GetStubCallDescriptor(
                 graph()->zone(), callable.descriptor(), 1 + arity, flags)));
       }
-    } else if (shared.HasBuiltinId() &&
-               Builtins::HasCppImplementation(shared.builtin_id())) {
+    } else if (shared.HasBuiltinId() && Builtins::IsCpp(shared.builtin_id())) {
       // Patch {node} to a direct CEntry call.
       ReduceBuiltin(jsgraph(), node, shared.builtin_id(), arity, flags);
     } else if (shared.HasBuiltinId() &&

@@ -5,11 +5,11 @@
 #ifndef V8_OBJECTS_SCOPE_INFO_H_
 #define V8_OBJECTS_SCOPE_INFO_H_
 
-#include "src/function-kind.h"
-#include "src/globals.h"
-#include "src/objects.h"
+#include "src/common/globals.h"
 #include "src/objects/fixed-array.h"
-#include "src/utils.h"
+#include "src/objects/function-kind.h"
+#include "src/objects/objects.h"
+#include "src/utils/utils.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -22,7 +22,7 @@ class Handle;
 class Isolate;
 template <typename T>
 class MaybeHandle;
-class ModuleInfo;
+class SourceTextModuleInfo;
 class Scope;
 class Zone;
 
@@ -47,8 +47,11 @@ class ScopeInfo : public FixedArray {
   // True if this scope is a (var) declaration scope.
   bool is_declaration_scope() const;
 
+  // True if this scope is a class scope.
+  bool is_class_scope() const;
+
   // Does this scope make a sloppy eval call?
-  bool CallsSloppyEval() const;
+  bool SloppyEvalCanExtendVars() const;
 
   // Return the number of context slots for code if a context is allocated. This
   // number consists of three parts:
@@ -66,16 +69,23 @@ class ScopeInfo : public FixedArray {
   // or context-allocated?
   bool HasAllocatedReceiver() const;
 
+  // Does this scope has class brand (for private methods)?
+  bool HasClassBrand() const;
+
+  // Does this scope contains a saved class variable context local slot index
+  // for checking receivers of static private methods?
+  bool HasSavedClassVariableIndex() const;
+
   // Does this scope declare a "new.target" binding?
   bool HasNewTarget() const;
 
   // Is this scope the scope of a named function expression?
-  bool HasFunctionName() const;
+  V8_EXPORT_PRIVATE bool HasFunctionName() const;
 
   // See SharedFunctionInfo::HasSharedName.
-  bool HasSharedFunctionName() const;
+  V8_EXPORT_PRIVATE bool HasSharedFunctionName() const;
 
-  bool HasInferredFunctionName() const;
+  V8_EXPORT_PRIVATE bool HasInferredFunctionName() const;
 
   void SetFunctionName(Object name);
   void SetInferredFunctionName(String name);
@@ -92,7 +102,7 @@ class ScopeInfo : public FixedArray {
   inline bool HasSimpleParameters() const;
 
   // Return the function_name if present.
-  Object FunctionName() const;
+  V8_EXPORT_PRIVATE Object FunctionName() const;
 
   // The function's name if it is non-empty, otherwise the inferred name or an
   // empty string.
@@ -100,20 +110,23 @@ class ScopeInfo : public FixedArray {
 
   // Return the function's inferred name if present.
   // See SharedFunctionInfo::function_identifier.
-  Object InferredFunctionName() const;
+  V8_EXPORT_PRIVATE Object InferredFunctionName() const;
 
   // Position information accessors.
   int StartPosition() const;
   int EndPosition() const;
   void SetPositionInfo(int start, int end);
 
-  ModuleInfo ModuleDescriptorInfo() const;
+  SourceTextModuleInfo ModuleDescriptorInfo() const;
 
   // Return the name of the given context local.
   String ContextLocalName(int var) const;
 
   // Return the mode of the given context local.
   VariableMode ContextLocalMode(int var) const;
+
+  // Return whether the given context local variable is static.
+  IsStaticFlag ContextLocalIsStaticFlag(int var) const;
 
   // Return the initialization flag of the given context local.
   InitializationFlag ContextLocalInitFlag(int var) const;
@@ -135,7 +148,8 @@ class ScopeInfo : public FixedArray {
   // mode for that variable.
   static int ContextSlotIndex(ScopeInfo scope_info, String name,
                               VariableMode* mode, InitializationFlag* init_flag,
-                              MaybeAssignedFlag* maybe_assigned_flag);
+                              MaybeAssignedFlag* maybe_assigned_flag,
+                              IsStaticFlag* is_static_flag);
 
   // Lookup metadata of a MODULE-allocated variable.  Return 0 if there is no
   // module variable with the given name (the index value of a MODULE variable
@@ -155,6 +169,12 @@ class ScopeInfo : public FixedArray {
   // context-allocated.  Otherwise returns a value < 0.
   int ReceiverContextSlotIndex() const;
 
+  // Lookup support for serialized scope info.  Returns the index of the
+  // saved class variable in context local slots if scope is a class scope
+  // and it contains static private methods that may be accessed.
+  // Otherwise returns a value < 0.
+  int SavedClassVariableContextLocalIndex() const;
+
   FunctionKind function_kind() const;
 
   // Returns true if this ScopeInfo is linked to a outer ScopeInfo.
@@ -169,6 +189,10 @@ class ScopeInfo : public FixedArray {
 
   // Return the outer ScopeInfo if present.
   ScopeInfo OuterScopeInfo() const;
+
+  // Returns true if this ScopeInfo was created for a scope that skips the
+  // closest outer class when resolving private names.
+  bool PrivateNameLookupSkipsOuterClass() const;
 
 #ifdef DEBUG
   bool Equals(ScopeInfo other) const;
@@ -214,37 +238,29 @@ class ScopeInfo : public FixedArray {
   enum VariableAllocationInfo { NONE, STACK, CONTEXT, UNUSED };
 
   // Properties of scopes.
-  class ScopeTypeField : public BitField<ScopeType, 0, 4> {};
-  class CallsSloppyEvalField : public BitField<bool, ScopeTypeField::kNext, 1> {
-  };
+  using ScopeTypeField = BitField<ScopeType, 0, 4>;
+  using SloppyEvalCanExtendVarsField = ScopeTypeField::Next<bool, 1>;
   STATIC_ASSERT(LanguageModeSize == 2);
-  class LanguageModeField
-      : public BitField<LanguageMode, CallsSloppyEvalField::kNext, 1> {};
-  class DeclarationScopeField
-      : public BitField<bool, LanguageModeField::kNext, 1> {};
-  class ReceiverVariableField
-      : public BitField<VariableAllocationInfo, DeclarationScopeField::kNext,
-                        2> {};
-  class HasNewTargetField
-      : public BitField<bool, ReceiverVariableField::kNext, 1> {};
-  class FunctionVariableField
-      : public BitField<VariableAllocationInfo, HasNewTargetField::kNext, 2> {};
+  using LanguageModeField = SloppyEvalCanExtendVarsField::Next<LanguageMode, 1>;
+  using DeclarationScopeField = LanguageModeField::Next<bool, 1>;
+  using ReceiverVariableField =
+      DeclarationScopeField::Next<VariableAllocationInfo, 2>;
+  using HasClassBrandField = ReceiverVariableField::Next<bool, 1>;
+  using HasSavedClassVariableIndexField = HasClassBrandField::Next<bool, 1>;
+  using HasNewTargetField = HasSavedClassVariableIndexField::Next<bool, 1>;
+  using FunctionVariableField =
+      HasNewTargetField::Next<VariableAllocationInfo, 2>;
   // TODO(cbruni): Combine with function variable field when only storing the
   // function name.
-  class HasInferredFunctionNameField
-      : public BitField<bool, FunctionVariableField::kNext, 1> {};
-  class IsAsmModuleField
-      : public BitField<bool, HasInferredFunctionNameField::kNext, 1> {};
-  class HasSimpleParametersField
-      : public BitField<bool, IsAsmModuleField::kNext, 1> {};
-  class FunctionKindField
-      : public BitField<FunctionKind, HasSimpleParametersField::kNext, 5> {};
-  class HasOuterScopeInfoField
-      : public BitField<bool, FunctionKindField::kNext, 1> {};
-  class IsDebugEvaluateScopeField
-      : public BitField<bool, HasOuterScopeInfoField::kNext, 1> {};
-  class ForceContextAllocationField
-      : public BitField<bool, IsDebugEvaluateScopeField::kNext, 1> {};
+  using HasInferredFunctionNameField = FunctionVariableField::Next<bool, 1>;
+  using IsAsmModuleField = HasInferredFunctionNameField::Next<bool, 1>;
+  using HasSimpleParametersField = IsAsmModuleField::Next<bool, 1>;
+  using FunctionKindField = HasSimpleParametersField::Next<FunctionKind, 5>;
+  using HasOuterScopeInfoField = FunctionKindField::Next<bool, 1>;
+  using IsDebugEvaluateScopeField = HasOuterScopeInfoField::Next<bool, 1>;
+  using ForceContextAllocationField = IsDebugEvaluateScopeField::Next<bool, 1>;
+  using PrivateNameLookupSkipsOuterClassField =
+      ForceContextAllocationField::Next<bool, 1>;
 
   STATIC_ASSERT(kLastFunctionKind <= FunctionKindField::kMax);
 
@@ -261,27 +277,32 @@ class ScopeInfo : public FixedArray {
   //    the context locals in ContextLocalNames. One slot is used per
   //    context local, so in total this part occupies ContextLocalCount()
   //    slots in the array.
-  // 3. ReceiverInfo:
+  // 3. SavedClassVariableInfo:
+  //    If the scope is a class scope and it has static private methods that
+  //    may be accessed directly or through eval, one slot is reserved to hold
+  //    the context slot index for the class variable.
+  // 4. ReceiverInfo:
   //    If the scope binds a "this" value, one slot is reserved to hold the
   //    context or stack slot index for the variable.
-  // 4. FunctionNameInfo:
+  // 5. FunctionNameInfo:
   //    If the scope belongs to a named function expression this part contains
   //    information about the function variable. It always occupies two array
   //    slots:  a. The name of the function variable.
   //            b. The context or stack slot index for the variable.
-  // 5. InferredFunctionName:
+  // 6. InferredFunctionName:
   //    Contains the function's inferred name.
-  // 6. SourcePosition:
+  // 7. SourcePosition:
   //    Contains two slots with a) the startPosition and b) the endPosition if
   //    the scope belongs to a function or script.
-  // 7. OuterScopeInfoIndex:
+  // 8. OuterScopeInfoIndex:
   //    The outer scope's ScopeInfo or the hole if there's none.
-  // 8. ModuleInfo, ModuleVariableCount, and ModuleVariables:
-  //    For a module scope, this part contains the ModuleInfo, the number of
-  //    MODULE-allocated variables, and the metadata of those variables.  For
-  //    non-module scopes it is empty.
+  // 9. SourceTextModuleInfo, ModuleVariableCount, and ModuleVariables:
+  //    For a module scope, this part contains the SourceTextModuleInfo, the
+  //    number of MODULE-allocated variables, and the metadata of those
+  //    variables.  For non-module scopes it is empty.
   int ContextLocalNamesIndex() const;
   int ContextLocalInfosIndex() const;
+  int SavedClassVariableInfoIndex() const;
   int ReceiverInfoIndex() const;
   int FunctionNameInfoIndex() const;
   int InferredFunctionNameIndex() const;
@@ -311,11 +332,11 @@ class ScopeInfo : public FixedArray {
   static const int kPositionInfoEntries = 2;
 
   // Properties of variables.
-  class VariableModeField : public BitField<VariableMode, 0, 3> {};
-  class InitFlagField : public BitField<InitializationFlag, 3, 1> {};
-  class MaybeAssignedFlagField : public BitField<MaybeAssignedFlag, 4, 1> {};
-  class ParameterNumberField
-      : public BitField<uint32_t, MaybeAssignedFlagField::kNext, 16> {};
+  using VariableModeField = BitField<VariableMode, 0, 4>;
+  using InitFlagField = VariableModeField::Next<InitializationFlag, 1>;
+  using MaybeAssignedFlagField = InitFlagField::Next<MaybeAssignedFlag, 1>;
+  using ParameterNumberField = MaybeAssignedFlagField::Next<uint32_t, 16>;
+  using IsStaticFlagField = ParameterNumberField::Next<IsStaticFlag, 1>;
 
   friend class ScopeIterator;
   friend std::ostream& operator<<(std::ostream& os,

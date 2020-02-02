@@ -2,23 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/api.h"
+#include "src/api/api.h"
 #include "src/builtins/builtins-utils-gen.h"
 #include "src/builtins/builtins.h"
-#include "src/code-stub-assembler.h"
+#include "src/codegen/code-stub-assembler.h"
+#include "src/codegen/macro-assembler.h"
 #include "src/heap/heap-inl.h"  // crbug.com/v8/8499
 #include "src/ic/accessor-assembler.h"
 #include "src/ic/keyed-store-generic.h"
-#include "src/macro-assembler.h"
+#include "src/logging/counters.h"
 #include "src/objects/debug-objects.h"
 #include "src/objects/shared-function-info.h"
 #include "src/runtime/runtime.h"
 
 namespace v8 {
 namespace internal {
-
-template <typename T>
-using TNode = compiler::TNode<T>;
 
 // -----------------------------------------------------------------------------
 // Stack checks.
@@ -31,12 +29,14 @@ void Builtins::Generate_StackCheck(MacroAssembler* masm) {
 // TurboFan support builtins.
 
 TF_BUILTIN(CopyFastSmiOrObjectElements, CodeStubAssembler) {
-  Node* object = Parameter(Descriptor::kObject);
+  TNode<JSObject> js_object = CAST(Parameter(Descriptor::kObject));
 
   // Load the {object}s elements.
-  Node* source = LoadObjectField(object, JSObject::kElementsOffset);
-  Node* target = CloneFixedArray(source, ExtractFixedArrayFlag::kFixedArrays);
-  StoreObjectField(object, JSObject::kElementsOffset, target);
+  TNode<FixedArrayBase> source =
+      CAST(LoadObjectField(js_object, JSObject::kElementsOffset));
+  TNode<FixedArrayBase> target =
+      CloneFixedArray(source, ExtractFixedArrayFlag::kFixedArrays);
+  StoreObjectField(js_object, JSObject::kElementsOffset, target);
   Return(target);
 }
 
@@ -46,7 +46,7 @@ TF_BUILTIN(GrowFastDoubleElements, CodeStubAssembler) {
   Node* context = Parameter(Descriptor::kContext);
 
   Label runtime(this, Label::kDeferred);
-  Node* elements = LoadElements(object);
+  TNode<FixedArrayBase> elements = LoadElements(object);
   elements = TryGrowElementsCapacity(object, elements, PACKED_DOUBLE_ELEMENTS,
                                      key, &runtime);
   Return(elements);
@@ -61,7 +61,7 @@ TF_BUILTIN(GrowFastSmiOrObjectElements, CodeStubAssembler) {
   Node* context = Parameter(Descriptor::kContext);
 
   Label runtime(this, Label::kDeferred);
-  Node* elements = LoadElements(object);
+  TNode<FixedArrayBase> elements = LoadElements(object);
   elements =
       TryGrowElementsCapacity(object, elements, PACKED_ELEMENTS, key, &runtime);
   Return(elements);
@@ -103,7 +103,7 @@ TF_BUILTIN(NewArgumentsElements, CodeStubAssembler) {
       // the mapped elements (i.e. the first {mapped_count}) with the hole, but
       // make sure not to overshoot the {length} if some arguments are missing.
       TNode<IntPtrT> number_of_holes = IntPtrMin(mapped_count, length);
-      Node* the_hole = TheHoleConstant();
+      TNode<Oddball> the_hole = TheHoleConstant();
 
       // Fill the first elements up to {number_of_holes} with the hole.
       TVARIABLE(IntPtrT, var_index, IntPtrConstant(0));
@@ -115,7 +115,7 @@ TF_BUILTIN(NewArgumentsElements, CodeStubAssembler) {
         TNode<IntPtrT> index = var_index.value();
 
         // Check if we are done.
-        GotoIf(WordEqual(index, number_of_holes), &done_loop1);
+        GotoIf(IntPtrEqual(index, number_of_holes), &done_loop1);
 
         // Store the hole into the {result}.
         StoreFixedArrayElement(result, index, the_hole, SKIP_WRITE_BARRIER);
@@ -138,7 +138,7 @@ TF_BUILTIN(NewArgumentsElements, CodeStubAssembler) {
         TNode<IntPtrT> index = var_index.value();
 
         // Check if we are done.
-        GotoIf(WordEqual(index, length), &done_loop2);
+        GotoIf(IntPtrEqual(index, length), &done_loop2);
 
         // Load the parameter at the given {index}.
         TNode<Object> value = BitcastWordToTagged(
@@ -212,7 +212,7 @@ class RecordWriteCodeStubAssembler : public CodeStubAssembler {
       : CodeStubAssembler(state) {}
 
   Node* IsMarking() {
-    Node* is_marking_addr = ExternalConstant(
+    TNode<ExternalReference> is_marking_addr = ExternalConstant(
         ExternalReference::heap_is_marking_flag_address(this->isolate()));
     return Load(MachineType::Uint8(), is_marking_addr);
   }
@@ -265,31 +265,32 @@ class RecordWriteCodeStubAssembler : public CodeStubAssembler {
     }
   }
 
-  Node* ShouldSkipFPRegs(Node* mode) {
-    return WordEqual(mode, SmiConstant(kDontSaveFPRegs));
+  Node* ShouldSkipFPRegs(SloppyTNode<Object> mode) {
+    return TaggedEqual(mode, SmiConstant(kDontSaveFPRegs));
   }
 
-  Node* ShouldEmitRememberSet(Node* remembered_set) {
-    return WordEqual(remembered_set, SmiConstant(EMIT_REMEMBERED_SET));
+  Node* ShouldEmitRememberSet(SloppyTNode<Object> remembered_set) {
+    return TaggedEqual(remembered_set, SmiConstant(EMIT_REMEMBERED_SET));
   }
 
-  void CallCFunction1WithCallerSavedRegistersMode(MachineType return_type,
-                                                  MachineType arg0_type,
-                                                  Node* function, Node* arg0,
-                                                  Node* mode, Label* next) {
+  void CallCFunction2WithCallerSavedRegistersMode(
+      MachineType return_type, MachineType arg0_type, MachineType arg1_type,
+      Node* function, Node* arg0, Node* arg1, Node* mode, Label* next) {
     Label dont_save_fp(this), save_fp(this);
     Branch(ShouldSkipFPRegs(mode), &dont_save_fp, &save_fp);
     BIND(&dont_save_fp);
     {
-      CallCFunction1WithCallerSavedRegisters(return_type, arg0_type, function,
-                                             arg0, kDontSaveFPRegs);
+      CallCFunctionWithCallerSavedRegisters(
+          function, return_type, kDontSaveFPRegs,
+          std::make_pair(arg0_type, arg0), std::make_pair(arg1_type, arg1));
       Goto(next);
     }
 
     BIND(&save_fp);
     {
-      CallCFunction1WithCallerSavedRegisters(return_type, arg0_type, function,
-                                             arg0, kSaveFPRegs);
+      CallCFunctionWithCallerSavedRegisters(function, return_type, kSaveFPRegs,
+                                            std::make_pair(arg0_type, arg0),
+                                            std::make_pair(arg1_type, arg1));
       Goto(next);
     }
   }
@@ -302,48 +303,98 @@ class RecordWriteCodeStubAssembler : public CodeStubAssembler {
     Branch(ShouldSkipFPRegs(mode), &dont_save_fp, &save_fp);
     BIND(&dont_save_fp);
     {
-      CallCFunction3WithCallerSavedRegisters(return_type, arg0_type, arg1_type,
-                                             arg2_type, function, arg0, arg1,
-                                             arg2, kDontSaveFPRegs);
+      CallCFunctionWithCallerSavedRegisters(
+          function, return_type, kDontSaveFPRegs,
+          std::make_pair(arg0_type, arg0), std::make_pair(arg1_type, arg1),
+          std::make_pair(arg2_type, arg2));
       Goto(next);
     }
 
     BIND(&save_fp);
     {
-      CallCFunction3WithCallerSavedRegisters(return_type, arg0_type, arg1_type,
-                                             arg2_type, function, arg0, arg1,
-                                             arg2, kSaveFPRegs);
+      CallCFunctionWithCallerSavedRegisters(
+          function, return_type, kSaveFPRegs, std::make_pair(arg0_type, arg0),
+          std::make_pair(arg1_type, arg1), std::make_pair(arg2_type, arg2));
       Goto(next);
     }
   }
 
-  void InsertToStoreBufferAndGoto(Node* isolate, Node* slot, Node* mode,
-                                  Label* next) {
-    Node* store_buffer_top_addr =
-        ExternalConstant(ExternalReference::store_buffer_top(this->isolate()));
-    Node* store_buffer_top =
-        Load(MachineType::Pointer(), store_buffer_top_addr);
-    StoreNoWriteBarrier(MachineType::PointerRepresentation(), store_buffer_top,
-                        slot);
-    Node* new_store_buffer_top =
-        IntPtrAdd(store_buffer_top, IntPtrConstant(kSystemPointerSize));
-    StoreNoWriteBarrier(MachineType::PointerRepresentation(),
-                        store_buffer_top_addr, new_store_buffer_top);
+  void InsertIntoRememberedSetAndGotoSlow(Node* isolate, TNode<IntPtrT> object,
+                                          TNode<IntPtrT> slot, Node* mode,
+                                          Label* next) {
+    TNode<IntPtrT> page = PageFromAddress(object);
+    TNode<ExternalReference> function =
+        ExternalConstant(ExternalReference::insert_remembered_set_function());
+    CallCFunction2WithCallerSavedRegistersMode(
+        MachineType::Int32(), MachineType::Pointer(), MachineType::Pointer(),
+        function, page, slot, mode, next);
+  }
 
-    Node* test = WordAnd(new_store_buffer_top,
-                         IntPtrConstant(Heap::store_buffer_mask_constant()));
+  void InsertIntoRememberedSetAndGoto(Node* isolate, TNode<IntPtrT> object,
+                                      TNode<IntPtrT> slot, Node* mode,
+                                      Label* next) {
+    Label slow_path(this);
+    TNode<IntPtrT> page = PageFromAddress(object);
 
-    Label overflow(this);
-    Branch(WordEqual(test, IntPtrConstant(0)), &overflow, next);
+    // Load address of SlotSet
+    TNode<IntPtrT> slot_set_array = LoadSlotSetArray(page, &slow_path);
+    TNode<IntPtrT> slot_offset = IntPtrSub(slot, page);
 
-    BIND(&overflow);
-    {
-      Node* function =
-          ExternalConstant(ExternalReference::store_buffer_overflow_function());
-      CallCFunction1WithCallerSavedRegistersMode(MachineType::Int32(),
-                                                 MachineType::Pointer(),
-                                                 function, isolate, mode, next);
-    }
+    // Load bucket
+    TNode<IntPtrT> bucket = LoadBucket(slot_set_array, slot_offset, &slow_path);
+
+    // Update cell
+    SetBitInCell(bucket, slot_offset);
+
+    Goto(next);
+
+    BIND(&slow_path);
+    InsertIntoRememberedSetAndGotoSlow(isolate, object, slot, mode, next);
+  }
+
+  TNode<IntPtrT> LoadSlotSetArray(TNode<IntPtrT> page, Label* slow_path) {
+    TNode<IntPtrT> slot_set_array = UncheckedCast<IntPtrT>(
+        Load(MachineType::Pointer(), page,
+             IntPtrConstant(MemoryChunk::kOldToNewSlotSetOffset)));
+    GotoIf(WordEqual(slot_set_array, IntPtrConstant(0)), slow_path);
+
+    return slot_set_array;
+  }
+
+  TNode<IntPtrT> LoadBucket(TNode<IntPtrT> slot_set_array,
+                            TNode<WordT> slot_offset, Label* slow_path) {
+    // Assume here that SlotSet only contains of buckets
+    DCHECK_EQ(SlotSet::kSize, SlotSet::kBuckets * sizeof(SlotSet::Bucket));
+    TNode<WordT> bucket_index =
+        WordShr(slot_offset, SlotSet::kBitsPerBucketLog2 + kTaggedSizeLog2);
+    TNode<IntPtrT> bucket = UncheckedCast<IntPtrT>(
+        Load(MachineType::Pointer(), slot_set_array,
+             WordShl(bucket_index, kSystemPointerSizeLog2)));
+    GotoIf(WordEqual(bucket, IntPtrConstant(0)), slow_path);
+    return bucket;
+  }
+
+  void SetBitInCell(TNode<IntPtrT> bucket, TNode<WordT> slot_offset) {
+    // Load cell value
+    TNode<WordT> cell_offset = WordAnd(
+        WordShr(slot_offset, SlotSet::kBitsPerCellLog2 + kTaggedSizeLog2 -
+                                 SlotSet::kCellSizeBytesLog2),
+        IntPtrConstant((SlotSet::kCellsPerBucket - 1)
+                       << SlotSet::kCellSizeBytesLog2));
+    TNode<IntPtrT> cell_address =
+        UncheckedCast<IntPtrT>(IntPtrAdd(bucket, cell_offset));
+    TNode<IntPtrT> old_cell_value =
+        ChangeInt32ToIntPtr(Load<Int32T>(cell_address));
+
+    // Calculate new cell value
+    TNode<WordT> bit_index = WordAnd(WordShr(slot_offset, kTaggedSizeLog2),
+                                     IntPtrConstant(SlotSet::kBitsPerCell - 1));
+    TNode<IntPtrT> new_cell_value = UncheckedCast<IntPtrT>(
+        WordOr(old_cell_value, WordShl(IntPtrConstant(1), bit_index)));
+
+    // Update cell value
+    StoreNoWriteBarrier(MachineRepresentation::kWord32, cell_address,
+                        TruncateIntPtrToInt32(new_cell_value));
   }
 };
 
@@ -391,19 +442,24 @@ TF_BUILTIN(RecordWrite, RecordWriteCodeStubAssembler) {
 
     BIND(&store_buffer_exit);
     {
-      Node* isolate_constant =
+      TNode<ExternalReference> isolate_constant =
           ExternalConstant(ExternalReference::isolate_address(isolate()));
       Node* fp_mode = Parameter(Descriptor::kFPMode);
-      InsertToStoreBufferAndGoto(isolate_constant, slot, fp_mode, &exit);
+      TNode<IntPtrT> object =
+          BitcastTaggedToWord(Parameter(Descriptor::kObject));
+      InsertIntoRememberedSetAndGoto(isolate_constant, object, slot, fp_mode,
+                                     &exit);
     }
 
     BIND(&store_buffer_incremental_wb);
     {
-      Node* isolate_constant =
+      TNode<ExternalReference> isolate_constant =
           ExternalConstant(ExternalReference::isolate_address(isolate()));
       Node* fp_mode = Parameter(Descriptor::kFPMode);
-      InsertToStoreBufferAndGoto(isolate_constant, slot, fp_mode,
-                                 &incremental_wb);
+      TNode<IntPtrT> object =
+          BitcastTaggedToWord(Parameter(Descriptor::kObject));
+      InsertIntoRememberedSetAndGoto(isolate_constant, object, slot, fp_mode,
+                                     &incremental_wb);
     }
   }
 
@@ -431,9 +487,9 @@ TF_BUILTIN(RecordWrite, RecordWriteCodeStubAssembler) {
 
     BIND(&call_incremental_wb);
     {
-      Node* function = ExternalConstant(
+      TNode<ExternalReference> function = ExternalConstant(
           ExternalReference::incremental_marking_record_write_function());
-      Node* isolate_constant =
+      TNode<ExternalReference> isolate_constant =
           ExternalConstant(ExternalReference::isolate_address(isolate()));
       Node* fp_mode = Parameter(Descriptor::kFPMode);
       TNode<IntPtrT> object =
@@ -446,6 +502,27 @@ TF_BUILTIN(RecordWrite, RecordWriteCodeStubAssembler) {
   }
 
   BIND(&exit);
+  IncrementCounter(isolate()->counters()->write_barriers(), 1);
+  Return(TrueConstant());
+}
+
+TF_BUILTIN(EphemeronKeyBarrier, RecordWriteCodeStubAssembler) {
+  Label exit(this);
+
+  TNode<ExternalReference> function = ExternalConstant(
+      ExternalReference::ephemeron_key_write_barrier_function());
+  TNode<ExternalReference> isolate_constant =
+      ExternalConstant(ExternalReference::isolate_address(isolate()));
+  Node* address = Parameter(Descriptor::kSlotAddress);
+  TNode<IntPtrT> object = BitcastTaggedToWord(Parameter(Descriptor::kObject));
+  Node* fp_mode = Parameter(Descriptor::kFPMode);
+  CallCFunction3WithCallerSavedRegistersMode(
+      MachineType::Int32(), MachineType::Pointer(), MachineType::Pointer(),
+      MachineType::Pointer(), function, object, address, isolate_constant,
+      fp_mode, &exit);
+
+  BIND(&exit);
+  IncrementCounter(isolate()->counters()->write_barriers(), 1);
   Return(TrueConstant());
 }
 
@@ -470,7 +547,7 @@ class DeletePropertyBaseAssembler : public AccessorAssembler {
     GotoIf(IsSetWord32(details, PropertyDetails::kAttributesDontDeleteMask),
            dont_delete);
     // Overwrite the entry itself (see NameDictionary::SetEntry).
-    TNode<HeapObject> filler = TheHoleConstant();
+    TNode<Oddball> filler = TheHoleConstant();
     DCHECK(RootsTable::IsImmortalImmovable(RootIndex::kTheHoleValue));
     StoreFixedArrayElement(properties, key_index, filler, SKIP_WRITE_BARRIER);
     StoreValueByKeyIndex<NameDictionary>(properties, key_index, filler,
@@ -506,14 +583,15 @@ TF_BUILTIN(DeleteProperty, DeletePropertyBaseAssembler) {
   TNode<Smi> language_mode = CAST(Parameter(Descriptor::kLanguageMode));
   TNode<Context> context = CAST(Parameter(Descriptor::kContext));
 
-  VARIABLE(var_index, MachineType::PointerRepresentation());
-  VARIABLE(var_unique, MachineRepresentation::kTagged, key);
+  TVARIABLE(IntPtrT, var_index);
+  TVARIABLE(Name, var_unique);
   Label if_index(this), if_unique_name(this), if_notunique(this),
-      if_notfound(this), slow(this);
+      if_notfound(this), slow(this), if_proxy(this);
 
   GotoIf(TaggedIsSmi(receiver), &slow);
   TNode<Map> receiver_map = LoadMap(CAST(receiver));
-  TNode<Int32T> instance_type = LoadMapInstanceType(receiver_map);
+  TNode<Uint16T> instance_type = LoadMapInstanceType(receiver_map);
+  GotoIf(InstanceTypeEqual(instance_type, JS_PROXY_TYPE), &if_proxy);
   GotoIf(IsCustomElementsReceiverInstanceType(instance_type), &slow);
   TryToName(key, &if_index, &var_index, &if_unique_name, &var_unique, &slow,
             &if_notunique);
@@ -527,8 +605,7 @@ TF_BUILTIN(DeleteProperty, DeletePropertyBaseAssembler) {
   BIND(&if_unique_name);
   {
     Comment("key is unique name");
-    TNode<Name> unique = CAST(var_unique.value());
-    CheckForAssociatedProtector(unique, &slow);
+    CheckForAssociatedProtector(var_unique.value(), &slow);
 
     Label dictionary(this), dont_delete(this);
     GotoIf(IsDictionaryMap(receiver_map), &dictionary);
@@ -543,8 +620,8 @@ TF_BUILTIN(DeleteProperty, DeletePropertyBaseAssembler) {
 
       TNode<NameDictionary> properties =
           CAST(LoadSlowProperties(CAST(receiver)));
-      DeleteDictionaryProperty(receiver, properties, unique, context,
-                               &dont_delete, &if_notfound);
+      DeleteDictionaryProperty(receiver, properties, var_unique.value(),
+                               context, &dont_delete, &if_notfound);
     }
 
     BIND(&dont_delete);
@@ -560,12 +637,20 @@ TF_BUILTIN(DeleteProperty, DeletePropertyBaseAssembler) {
   {
     // If the string was not found in the string table, then no object can
     // have a property with that name.
-    TryInternalizeString(key, &if_index, &var_index, &if_unique_name,
+    TryInternalizeString(CAST(key), &if_index, &var_index, &if_unique_name,
                          &var_unique, &if_notfound, &slow);
   }
 
   BIND(&if_notfound);
   Return(TrueConstant());
+
+  BIND(&if_proxy);
+  {
+    TNode<Name> name = CAST(CallBuiltin(Builtins::kToName, context, key));
+    GotoIf(IsPrivateSymbol(name), &slow);
+    TailCallBuiltin(Builtins::kProxyDeleteProperty, context, receiver, name,
+                    language_mode);
+  }
 
   BIND(&slow);
   {
@@ -574,12 +659,121 @@ TF_BUILTIN(DeleteProperty, DeletePropertyBaseAssembler) {
   }
 }
 
+namespace {
+
+class SetOrCopyDataPropertiesAssembler : public CodeStubAssembler {
+ public:
+  explicit SetOrCopyDataPropertiesAssembler(compiler::CodeAssemblerState* state)
+      : CodeStubAssembler(state) {}
+
+ protected:
+  TNode<Object> SetOrCopyDataProperties(TNode<Context> context,
+                                        TNode<JSReceiver> target,
+                                        TNode<Object> source, Label* if_runtime,
+                                        bool use_set = true) {
+    Label if_done(this), if_noelements(this),
+        if_sourcenotjsobject(this, Label::kDeferred);
+
+    // JSPrimitiveWrapper wrappers for numbers don't have any enumerable own
+    // properties, so we can immediately skip the whole operation if {source} is
+    // a Smi.
+    GotoIf(TaggedIsSmi(source), &if_done);
+
+    // Otherwise check if {source} is a proper JSObject, and if not, defer
+    // to testing for non-empty strings below.
+    TNode<Map> source_map = LoadMap(CAST(source));
+    TNode<Uint16T> source_instance_type = LoadMapInstanceType(source_map);
+    GotoIfNot(IsJSObjectInstanceType(source_instance_type),
+              &if_sourcenotjsobject);
+
+    TNode<FixedArrayBase> source_elements = LoadElements(CAST(source));
+    GotoIf(IsEmptyFixedArray(source_elements), &if_noelements);
+    Branch(IsEmptySlowElementDictionary(source_elements), &if_noelements,
+           if_runtime);
+
+    BIND(&if_noelements);
+    {
+      // If the target is deprecated, the object will be updated on first store.
+      // If the source for that store equals the target, this will invalidate
+      // the cached representation of the source. Handle this case in runtime.
+      TNode<Map> target_map = LoadMap(target);
+      GotoIf(IsDeprecatedMap(target_map), if_runtime);
+
+      if (use_set) {
+        TNode<BoolT> target_is_simple_receiver = IsSimpleObjectMap(target_map);
+        ForEachEnumerableOwnProperty(
+            context, source_map, CAST(source), kEnumerationOrder,
+            [=](TNode<Name> key, TNode<Object> value) {
+              KeyedStoreGenericGenerator::SetProperty(
+                  state(), context, target, target_is_simple_receiver, key,
+                  value, LanguageMode::kStrict);
+            },
+            if_runtime);
+      } else {
+        ForEachEnumerableOwnProperty(
+            context, source_map, CAST(source), kEnumerationOrder,
+            [=](TNode<Name> key, TNode<Object> value) {
+              CallBuiltin(Builtins::kSetPropertyInLiteral, context, target, key,
+                          value);
+            },
+            if_runtime);
+      }
+      Goto(&if_done);
+    }
+
+    BIND(&if_sourcenotjsobject);
+    {
+      // Handle other JSReceivers in the runtime.
+      GotoIf(IsJSReceiverInstanceType(source_instance_type), if_runtime);
+
+      // Non-empty strings are the only non-JSReceivers that need to be
+      // handled explicitly by Object.assign() and CopyDataProperties.
+      GotoIfNot(IsStringInstanceType(source_instance_type), &if_done);
+      TNode<IntPtrT> source_length = LoadStringLengthAsWord(CAST(source));
+      Branch(IntPtrEqual(source_length, IntPtrConstant(0)), &if_done,
+             if_runtime);
+    }
+
+    BIND(&if_done);
+    return UndefinedConstant();
+  }
+};
+
+}  // namespace
+
+// ES #sec-copydataproperties
+TF_BUILTIN(CopyDataProperties, SetOrCopyDataPropertiesAssembler) {
+  TNode<JSObject> target = CAST(Parameter(Descriptor::kTarget));
+  TNode<Object> source = CAST(Parameter(Descriptor::kSource));
+  TNode<Context> context = CAST(Parameter(Descriptor::kContext));
+
+  CSA_ASSERT(this, TaggedNotEqual(target, source));
+
+  Label if_runtime(this, Label::kDeferred);
+  Return(SetOrCopyDataProperties(context, target, source, &if_runtime, false));
+
+  BIND(&if_runtime);
+  TailCallRuntime(Runtime::kCopyDataProperties, context, target, source);
+}
+
+TF_BUILTIN(SetDataProperties, SetOrCopyDataPropertiesAssembler) {
+  TNode<JSReceiver> target = CAST(Parameter(Descriptor::kTarget));
+  TNode<Object> source = CAST(Parameter(Descriptor::kSource));
+  TNode<Context> context = CAST(Parameter(Descriptor::kContext));
+
+  Label if_runtime(this, Label::kDeferred);
+  Return(SetOrCopyDataProperties(context, target, source, &if_runtime, true));
+
+  BIND(&if_runtime);
+  TailCallRuntime(Runtime::kSetDataProperties, context, target, source);
+}
+
 TF_BUILTIN(ForInEnumerate, CodeStubAssembler) {
-  Node* receiver = Parameter(Descriptor::kReceiver);
-  Node* context = Parameter(Descriptor::kContext);
+  TNode<HeapObject> receiver = CAST(Parameter(Descriptor::kReceiver));
+  TNode<Context> context = CAST(Parameter(Descriptor::kContext));
 
   Label if_empty(this), if_runtime(this, Label::kDeferred);
-  Node* receiver_map = CheckEnumCache(receiver, &if_empty, &if_runtime);
+  TNode<Map> receiver_map = CheckEnumCache(receiver, &if_empty, &if_runtime);
   Return(receiver_map);
 
   BIND(&if_empty);
@@ -621,19 +815,21 @@ TF_BUILTIN(SameValue, CodeStubAssembler) {
   Return(FalseConstant());
 }
 
-class InternalBuiltinsAssembler : public CodeStubAssembler {
- public:
-  explicit InternalBuiltinsAssembler(compiler::CodeAssemblerState* state)
-      : CodeStubAssembler(state) {}
+TF_BUILTIN(SameValueNumbersOnly, CodeStubAssembler) {
+  Node* lhs = Parameter(Descriptor::kLeft);
+  Node* rhs = Parameter(Descriptor::kRight);
 
-  template <typename Descriptor>
-  void GenerateAdaptorWithExitFrameType(
-      Builtins::ExitFrameType exit_frame_type);
-};
+  Label if_true(this), if_false(this);
+  BranchIfSameValue(lhs, rhs, &if_true, &if_false, SameValueMode::kNumbersOnly);
 
-template <typename Descriptor>
-void InternalBuiltinsAssembler::GenerateAdaptorWithExitFrameType(
-    Builtins::ExitFrameType exit_frame_type) {
+  BIND(&if_true);
+  Return(TrueConstant());
+
+  BIND(&if_false);
+  Return(FalseConstant());
+}
+
+TF_BUILTIN(AdaptorWithBuiltinExitFrame, CodeStubAssembler) {
   TNode<JSFunction> target = CAST(Parameter(Descriptor::kTarget));
   TNode<Object> new_target = CAST(Parameter(Descriptor::kNewTarget));
   TNode<WordT> c_function =
@@ -657,9 +853,9 @@ void InternalBuiltinsAssembler::GenerateAdaptorWithExitFrameType(
       argc,
       Int32Constant(BuiltinExitFrameConstants::kNumExtraArgsWithReceiver));
 
-  TNode<Code> code = HeapConstant(
-      CodeFactory::CEntry(isolate(), 1, kDontSaveFPRegs, kArgvOnStack,
-                          exit_frame_type == Builtins::BUILTIN_EXIT));
+  const bool builtin_exit_frame = true;
+  TNode<Code> code = HeapConstant(CodeFactory::CEntry(
+      isolate(), 1, kDontSaveFPRegs, kArgvOnStack, builtin_exit_frame));
 
   // Unconditionally push argc, target and new target as extra stack arguments.
   // They will be used by stack frame iterators when constructing stack trace.
@@ -672,29 +868,52 @@ void InternalBuiltinsAssembler::GenerateAdaptorWithExitFrameType(
                new_target);         // additional stack argument 4
 }
 
-TF_BUILTIN(AdaptorWithExitFrame, InternalBuiltinsAssembler) {
-  GenerateAdaptorWithExitFrameType<Descriptor>(Builtins::EXIT);
-}
-
-TF_BUILTIN(AdaptorWithBuiltinExitFrame, InternalBuiltinsAssembler) {
-  GenerateAdaptorWithExitFrameType<Descriptor>(Builtins::BUILTIN_EXIT);
-}
-
-TF_BUILTIN(AllocateInNewSpace, CodeStubAssembler) {
+TF_BUILTIN(AllocateInYoungGeneration, CodeStubAssembler) {
   TNode<IntPtrT> requested_size =
       UncheckedCast<IntPtrT>(Parameter(Descriptor::kRequestedSize));
+  CSA_CHECK(this, IsValidPositiveSmi(requested_size));
 
-  TailCallRuntime(Runtime::kAllocateInNewSpace, NoContextConstant(),
-                  SmiFromIntPtr(requested_size));
+  TNode<Smi> allocation_flags =
+      SmiConstant(Smi::FromInt(AllocateDoubleAlignFlag::encode(false) |
+                               AllowLargeObjectAllocationFlag::encode(true)));
+  TailCallRuntime(Runtime::kAllocateInYoungGeneration, NoContextConstant(),
+                  SmiFromIntPtr(requested_size), allocation_flags);
 }
 
-TF_BUILTIN(AllocateInOldSpace, CodeStubAssembler) {
+TF_BUILTIN(AllocateRegularInYoungGeneration, CodeStubAssembler) {
   TNode<IntPtrT> requested_size =
       UncheckedCast<IntPtrT>(Parameter(Descriptor::kRequestedSize));
+  CSA_CHECK(this, IsValidPositiveSmi(requested_size));
 
-  int flags = AllocateTargetSpace::encode(OLD_SPACE);
-  TailCallRuntime(Runtime::kAllocateInTargetSpace, NoContextConstant(),
-                  SmiFromIntPtr(requested_size), SmiConstant(flags));
+  TNode<Smi> allocation_flags =
+      SmiConstant(Smi::FromInt(AllocateDoubleAlignFlag::encode(false) |
+                               AllowLargeObjectAllocationFlag::encode(false)));
+  TailCallRuntime(Runtime::kAllocateInYoungGeneration, NoContextConstant(),
+                  SmiFromIntPtr(requested_size), allocation_flags);
+}
+
+TF_BUILTIN(AllocateInOldGeneration, CodeStubAssembler) {
+  TNode<IntPtrT> requested_size =
+      UncheckedCast<IntPtrT>(Parameter(Descriptor::kRequestedSize));
+  CSA_CHECK(this, IsValidPositiveSmi(requested_size));
+
+  TNode<Smi> runtime_flags =
+      SmiConstant(Smi::FromInt(AllocateDoubleAlignFlag::encode(false) |
+                               AllowLargeObjectAllocationFlag::encode(true)));
+  TailCallRuntime(Runtime::kAllocateInOldGeneration, NoContextConstant(),
+                  SmiFromIntPtr(requested_size), runtime_flags);
+}
+
+TF_BUILTIN(AllocateRegularInOldGeneration, CodeStubAssembler) {
+  TNode<IntPtrT> requested_size =
+      UncheckedCast<IntPtrT>(Parameter(Descriptor::kRequestedSize));
+  CSA_CHECK(this, IsValidPositiveSmi(requested_size));
+
+  TNode<Smi> runtime_flags =
+      SmiConstant(Smi::FromInt(AllocateDoubleAlignFlag::encode(false) |
+                               AllowLargeObjectAllocationFlag::encode(false)));
+  TailCallRuntime(Runtime::kAllocateInOldGeneration, NoContextConstant(),
+                  SmiFromIntPtr(requested_size), runtime_flags);
 }
 
 TF_BUILTIN(Abort, CodeStubAssembler) {
@@ -702,9 +921,9 @@ TF_BUILTIN(Abort, CodeStubAssembler) {
   TailCallRuntime(Runtime::kAbort, NoContextConstant(), message_id);
 }
 
-TF_BUILTIN(AbortJS, CodeStubAssembler) {
+TF_BUILTIN(AbortCSAAssert, CodeStubAssembler) {
   TNode<String> message = CAST(Parameter(Descriptor::kMessageOrMessageId));
-  TailCallRuntime(Runtime::kAbortJS, NoContextConstant(), message);
+  TailCallRuntime(Runtime::kAbortCSAAssert, NoContextConstant(), message);
 }
 
 void Builtins::Generate_CEntry_Return1_DontSaveFPRegs_ArgvOnStack_NoBuiltinExit(
@@ -765,12 +984,6 @@ void Builtins::Generate_MemCopyUint8Uint8(MacroAssembler* masm) {
 }
 #endif  // !defined(V8_TARGET_ARCH_ARM) && !defined(V8_TARGET_ARCH_MIPS)
 
-#ifndef V8_TARGET_ARCH_ARM
-void Builtins::Generate_MemCopyUint16Uint8(MacroAssembler* masm) {
-  masm->Call(BUILTIN_CODE(masm->isolate(), Illegal), RelocInfo::CODE_TARGET);
-}
-#endif  // V8_TARGET_ARCH_ARM
-
 #ifndef V8_TARGET_ARCH_IA32
 void Builtins::Generate_MemMove(MacroAssembler* masm) {
   masm->Call(BUILTIN_CODE(masm->isolate(), Illegal), RelocInfo::CODE_TARGET);
@@ -782,6 +995,8 @@ TF_BUILTIN(GetProperty, CodeStubAssembler) {
   Node* object = Parameter(Descriptor::kObject);
   Node* key = Parameter(Descriptor::kKey);
   Node* context = Parameter(Descriptor::kContext);
+  // TODO(duongn): consider tailcalling to GetPropertyWithReceiver(object,
+  // object, key, OnNonExistent::kReturnUndefined).
   Label if_notfound(this), if_proxy(this, Label::kDeferred),
       if_slow(this, Label::kDeferred);
 
@@ -807,7 +1022,7 @@ TF_BUILTIN(GetProperty, CodeStubAssembler) {
         Goto(if_bailout);
       };
 
-  TryPrototypeChainLookup(object, key, lookup_property_in_holder,
+  TryPrototypeChainLookup(object, object, key, lookup_property_in_holder,
                           lookup_element_in_holder, &if_notfound, &if_slow,
                           &if_proxy);
 
@@ -820,13 +1035,81 @@ TF_BUILTIN(GetProperty, CodeStubAssembler) {
   BIND(&if_proxy);
   {
     // Convert the {key} to a Name first.
-    Node* name = CallBuiltin(Builtins::kToName, context, key);
+    TNode<Object> name = CallBuiltin(Builtins::kToName, context, key);
 
     // The {object} is a JSProxy instance, look up the {name} on it, passing
     // {object} both as receiver and holder. If {name} is absent we can safely
     // return undefined from here.
     TailCallBuiltin(Builtins::kProxyGetProperty, context, object, name, object,
                     SmiConstant(OnNonExistent::kReturnUndefined));
+  }
+}
+
+// ES6 [[Get]] operation with Receiver.
+TF_BUILTIN(GetPropertyWithReceiver, CodeStubAssembler) {
+  Node* object = Parameter(Descriptor::kObject);
+  Node* key = Parameter(Descriptor::kKey);
+  Node* context = Parameter(Descriptor::kContext);
+  Node* receiver = Parameter(Descriptor::kReceiver);
+  TNode<Object> on_non_existent = CAST(Parameter(Descriptor::kOnNonExistent));
+  Label if_notfound(this), if_proxy(this, Label::kDeferred),
+      if_slow(this, Label::kDeferred);
+
+  CodeStubAssembler::LookupInHolder lookup_property_in_holder =
+      [=](Node* receiver, Node* holder, Node* holder_map,
+          Node* holder_instance_type, Node* unique_name, Label* next_holder,
+          Label* if_bailout) {
+        VARIABLE(var_value, MachineRepresentation::kTagged);
+        Label if_found(this);
+        TryGetOwnProperty(context, receiver, holder, holder_map,
+                          holder_instance_type, unique_name, &if_found,
+                          &var_value, next_holder, if_bailout);
+        BIND(&if_found);
+        Return(var_value.value());
+      };
+
+  CodeStubAssembler::LookupInHolder lookup_element_in_holder =
+      [=](Node* receiver, Node* holder, Node* holder_map,
+          Node* holder_instance_type, Node* index, Label* next_holder,
+          Label* if_bailout) {
+        // Not supported yet.
+        Use(next_holder);
+        Goto(if_bailout);
+      };
+
+  TryPrototypeChainLookup(receiver, object, key, lookup_property_in_holder,
+                          lookup_element_in_holder, &if_notfound, &if_slow,
+                          &if_proxy);
+
+  BIND(&if_notfound);
+  Label throw_reference_error(this);
+  GotoIf(TaggedEqual(on_non_existent,
+                     SmiConstant(OnNonExistent::kThrowReferenceError)),
+         &throw_reference_error);
+  CSA_ASSERT(this, TaggedEqual(on_non_existent,
+                               SmiConstant(OnNonExistent::kReturnUndefined)));
+  Return(UndefinedConstant());
+
+  BIND(&throw_reference_error);
+  Return(CallRuntime(Runtime::kThrowReferenceError, context, key));
+
+  BIND(&if_slow);
+  TailCallRuntime(Runtime::kGetPropertyWithReceiver, context, object, key,
+                  receiver, on_non_existent);
+
+  BIND(&if_proxy);
+  {
+    // Convert the {key} to a Name first.
+    TNode<Name> name = CAST(CallBuiltin(Builtins::kToName, context, key));
+
+    // Proxy cannot handle private symbol so bailout.
+    GotoIf(IsPrivateSymbol(name), &if_slow);
+
+    // The {object} is a JSProxy instance, look up the {name} on it, passing
+    // {object} both as receiver and holder. If {name} is absent we can safely
+    // return undefined from here.
+    TailCallBuiltin(Builtins::kProxyGetProperty, context, object, name,
+                    receiver, on_non_existent);
   }
 }
 

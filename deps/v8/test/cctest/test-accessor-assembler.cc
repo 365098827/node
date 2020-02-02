@@ -7,7 +7,7 @@
 #include "src/base/utils/random-number-generator.h"
 #include "src/ic/accessor-assembler.h"
 #include "src/ic/stub-cache.h"
-#include "src/objects-inl.h"
+#include "src/objects/objects-inl.h"
 #include "src/objects/smi.h"
 #include "test/cctest/compiler/code-assembler-tester.h"
 #include "test/cctest/compiler/function-tester.h"
@@ -118,7 +118,7 @@ Handle<Code> CreateCodeOfKind(Code::Kind kind) {
 }  // namespace
 
 TEST(TryProbeStubCache) {
-  typedef CodeStubAssembler::Label Label;
+  using Label = CodeStubAssembler::Label;
   Isolate* isolate(CcTest::InitIsolateOnce());
   const int kNumParams = 3;
   CodeAssemblerTester data(isolate, kNumParams);
@@ -129,8 +129,9 @@ TEST(TryProbeStubCache) {
 
   {
     Node* receiver = m.Parameter(0);
-    Node* name = m.Parameter(1);
-    Node* expected_handler = m.Parameter(2);
+    TNode<Object> name = m.CAST(m.Parameter(1));
+    TNode<MaybeObject> expected_handler =
+        m.UncheckedCast<MaybeObject>(m.Parameter(2));
 
     Label passed(&m), failed(&m);
 
@@ -140,12 +141,11 @@ TEST(TryProbeStubCache) {
     m.TryProbeStubCache(&stub_cache, receiver, name, &if_handler, &var_handler,
                         &if_miss);
     m.BIND(&if_handler);
-    m.Branch(m.WordEqual(expected_handler,
-                         m.BitcastMaybeObjectToWord(var_handler.value())),
-             &passed, &failed);
+    m.Branch(m.TaggedEqual(expected_handler, var_handler.value()), &passed,
+             &failed);
 
     m.BIND(&if_miss);
-    m.Branch(m.WordEqual(expected_handler, m.IntPtrConstant(0)), &passed,
+    m.Branch(m.TaggedEqual(expected_handler, m.SmiConstant(0)), &passed,
              &failed);
 
     m.BIND(&passed);

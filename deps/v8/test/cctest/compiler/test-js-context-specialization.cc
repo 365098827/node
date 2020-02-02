@@ -2,18 +2,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/codegen/tick-counter.h"
 #include "src/compiler/compiler-source-position-table.h"
 #include "src/compiler/js-context-specialization.h"
 #include "src/compiler/js-graph.h"
+#include "src/compiler/js-heap-broker.h"
 #include "src/compiler/js-operator.h"
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/node-properties.h"
+#include "src/compiler/simplified-operator.h"
 #include "src/heap/factory.h"
-#include "src/objects-inl.h"
-#include "src/property.h"
+#include "src/objects/objects-inl.h"
+#include "src/objects/property.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/compiler/function-tester.h"
-#include "test/cctest/compiler/graph-builder-tester.h"
 
 namespace v8 {
 namespace internal {
@@ -30,8 +32,8 @@ class ContextSpecializationTester : public HandleAndZoneScope {
         simplified_(main_zone()),
         jsgraph_(main_isolate(), graph(), common(), &javascript_, &simplified_,
                  &machine_),
-        reducer_(main_zone(), graph()),
-        js_heap_broker_(main_isolate(), main_zone()),
+        reducer_(main_zone(), graph(), &tick_counter_),
+        js_heap_broker_(main_isolate(), main_zone(), FLAG_trace_heap_broker),
         spec_(&reducer_, jsgraph(), &js_heap_broker_, context,
               MaybeHandle<JSFunction>()) {}
 
@@ -50,7 +52,10 @@ class ContextSpecializationTester : public HandleAndZoneScope {
   void CheckContextInputAndDepthChanges(Node* node, Node* expected_new_context,
                                         size_t expected_new_depth);
 
+  JSHeapBroker* broker() { return &js_heap_broker_; }
+
  private:
+  TickCounter tick_counter_;
   CanonicalHandleScope canonical_;
   Graph* graph_;
   CommonOperatorBuilder common_;
@@ -123,8 +128,9 @@ TEST(ReduceJSLoadContext0) {
   const int slot = Context::NATIVE_CONTEXT_INDEX;
   native->set(slot, *expected);
 
-  Node* const_context = t.jsgraph()->Constant(native);
-  Node* deep_const_context = t.jsgraph()->Constant(subcontext2);
+  Node* const_context = t.jsgraph()->Constant(ObjectRef(t.broker(), native));
+  Node* deep_const_context =
+      t.jsgraph()->Constant(ObjectRef(t.broker(), subcontext2));
   Node* param_context = t.graph()->NewNode(t.common()->Parameter(0), start);
 
   {
@@ -266,7 +272,8 @@ TEST(ReduceJSLoadContext2) {
   context_object0->set(slot_index, *slot_value0);
   context_object1->set(slot_index, *slot_value1);
 
-  Node* context0 = t.jsgraph()->Constant(context_object1);
+  Node* context0 =
+      t.jsgraph()->Constant(ObjectRef(t.broker(), context_object1));
   Node* context1 =
       t.graph()->NewNode(create_function_context, context0, start, start);
   Node* context2 =
@@ -420,8 +427,9 @@ TEST(ReduceJSStoreContext0) {
   const int slot = Context::NATIVE_CONTEXT_INDEX;
   native->set(slot, *expected);
 
-  Node* const_context = t.jsgraph()->Constant(native);
-  Node* deep_const_context = t.jsgraph()->Constant(subcontext2);
+  Node* const_context = t.jsgraph()->Constant(ObjectRef(t.broker(), native));
+  Node* deep_const_context =
+      t.jsgraph()->Constant(ObjectRef(t.broker(), subcontext2));
   Node* param_context = t.graph()->NewNode(t.common()->Parameter(0), start);
 
   {
@@ -528,7 +536,8 @@ TEST(ReduceJSStoreContext2) {
   context_object0->set(slot_index, *slot_value0);
   context_object1->set(slot_index, *slot_value1);
 
-  Node* context0 = t.jsgraph()->Constant(context_object1);
+  Node* context0 =
+      t.jsgraph()->Constant(ObjectRef(t.broker(), context_object1));
   Node* context1 =
       t.graph()->NewNode(create_function_context, context0, start, start);
   Node* context2 =

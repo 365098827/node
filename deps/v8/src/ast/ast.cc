@@ -12,17 +12,17 @@
 #include "src/base/hashmap.h"
 #include "src/builtins/builtins-constructor.h"
 #include "src/builtins/builtins.h"
-#include "src/contexts.h"
-#include "src/conversions-inl.h"
-#include "src/double.h"
-#include "src/elements.h"
-#include "src/objects-inl.h"
+#include "src/numbers/conversions-inl.h"
+#include "src/numbers/double.h"
+#include "src/objects/contexts.h"
+#include "src/objects/elements.h"
 #include "src/objects/literal-objects-inl.h"
 #include "src/objects/literal-objects.h"
 #include "src/objects/map.h"
-#include "src/property-details.h"
-#include "src/property.h"
-#include "src/string-stream.h"
+#include "src/objects/objects-inl.h"
+#include "src/objects/property-details.h"
+#include "src/objects/property.h"
+#include "src/strings/string-stream.h"
 #include "src/zone/zone-list-inl.h"
 
 namespace v8 {
@@ -48,8 +48,6 @@ static const char* NameForNativeContextIntrinsicIndex(uint32_t idx) {
 
   return "UnknownIntrinsicIndex";
 }
-
-void AstNode::Print() { Print(Isolate::Current()); }
 
 void AstNode::Print(Isolate* isolate) {
   AllowHandleDereference allow_deref;
@@ -124,12 +122,20 @@ bool Expression::IsUndefinedLiteral() const {
          var_proxy->raw_name()->IsOneByteEqualTo("undefined");
 }
 
+bool Expression::IsLiteralButNotNullOrUndefined() const {
+  return IsLiteral() && !IsNullOrUndefinedLiteral();
+}
+
 bool Expression::ToBooleanIsTrue() const {
   return IsLiteral() && AsLiteral()->ToBooleanIsTrue();
 }
 
 bool Expression::ToBooleanIsFalse() const {
   return IsLiteral() && AsLiteral()->ToBooleanIsFalse();
+}
+
+bool Expression::IsPrivateName() const {
+  return IsVariableProxy() && AsVariableProxy()->IsPrivateName();
 }
 
 bool Expression::IsValidReferenceExpression() const {
@@ -176,7 +182,7 @@ void VariableProxy::BindTo(Variable* var) {
   set_var(var);
   set_is_resolved();
   var->set_is_used();
-  if (is_assigned()) var->set_maybe_assigned();
+  if (is_assigned()) var->SetMaybeAssigned();
 }
 
 Assignment::Assignment(NodeType node_type, Token::Value op, Expression* target,
@@ -215,13 +221,7 @@ bool FunctionLiteral::AllowsLazyCompilation() {
 }
 
 bool FunctionLiteral::SafeToSkipArgumentsAdaptor() const {
-  // TODO(bmeurer,verwaest): The --fast_calls_with_arguments_mismatches
-  // is mostly here for checking the real-world impact of the calling
-  // convention. There's not really a point in turning off this flag
-  // otherwise, so we should remove it at some point, when we're done
-  // with the experiments (https://crbug.com/v8/8895).
-  return FLAG_fast_calls_with_arguments_mismatches &&
-         language_mode() == LanguageMode::kStrict &&
+  return language_mode() == LanguageMode::kStrict &&
          scope()->arguments() == nullptr &&
          scope()->rest_parameter() == nullptr;
 }
@@ -280,6 +280,21 @@ std::unique_ptr<char[]> FunctionLiteral::GetDebugName() const {
   memcpy(result.get(), result_vec.data(), result_vec.size());
   result[result_vec.size()] = '\0';
   return result;
+}
+
+bool FunctionLiteral::requires_brand_initialization() const {
+  Scope* outer = scope_->outer_scope();
+
+  // If there are no variables declared in the outer scope other than
+  // the class name variable, the outer class scope may be elided when
+  // the function is deserialized after preparsing.
+  if (!outer->is_class_scope()) return false;
+
+  return outer->AsClassScope()->brand() != nullptr;
+}
+
+bool FunctionLiteral::private_name_lookup_skips_outer_class() const {
+  return scope()->private_name_lookup_skips_outer_class();
 }
 
 ObjectLiteralProperty::ObjectLiteralProperty(Expression* key, Expression* value,
@@ -590,8 +605,8 @@ void ArrayLiteral::BuildBoilerplateDescription(Isolate* isolate) {
       boilerplate_value = handle(Smi::kZero, isolate);
     }
 
-    kind = GetMoreGeneralElementsKind(kind,
-                                      boilerplate_value->OptimalElementsKind());
+    kind = GetMoreGeneralElementsKind(
+        kind, boilerplate_value->OptimalElementsKind(isolate));
     fixed_array->set(array_index, *boilerplate_value);
   }
 
@@ -683,8 +698,8 @@ void MaterializedLiteral::BuildConstants(Isolate* isolate) {
 
 Handle<TemplateObjectDescription> GetTemplateObject::GetOrBuildDescription(
     Isolate* isolate) {
-  Handle<FixedArray> raw_strings =
-      isolate->factory()->NewFixedArray(this->raw_strings()->length(), TENURED);
+  Handle<FixedArray> raw_strings = isolate->factory()->NewFixedArray(
+      this->raw_strings()->length(), AllocationType::kOld);
   bool raw_and_cooked_match = true;
   for (int i = 0; i < raw_strings->length(); ++i) {
     if (this->cooked_strings()->at(i) == nullptr ||
@@ -697,7 +712,7 @@ Handle<TemplateObjectDescription> GetTemplateObject::GetOrBuildDescription(
   Handle<FixedArray> cooked_strings = raw_strings;
   if (!raw_and_cooked_match) {
     cooked_strings = isolate->factory()->NewFixedArray(
-        this->cooked_strings()->length(), TENURED);
+        this->cooked_strings()->length(), AllocationType::kOld);
     for (int i = 0; i < cooked_strings->length(); ++i) {
       if (this->cooked_strings()->at(i) != nullptr) {
         cooked_strings->set(i, *this->cooked_strings()->at(i)->string());
@@ -821,6 +836,9 @@ Call::CallType Call::GetCallType() const {
 
   Property* property = expression()->AsProperty();
   if (property != nullptr) {
+    if (property->IsPrivateReference()) {
+      return PRIVATE_CALL;
+    }
     bool is_super = property->IsSuperAccess();
     if (property->key()->IsPropertyName()) {
       return is_super ? NAMED_SUPER_PROPERTY_CALL : NAMED_PROPERTY_CALL;
@@ -872,7 +890,7 @@ Handle<Object> Literal::BuildValue(Isolate* isolate) const {
     case kSmi:
       return handle(Smi::FromInt(smi_), isolate);
     case kHeapNumber:
-      return isolate->factory()->NewNumber(number_, TENURED);
+      return isolate->factory()->NewNumber<AllocationType::kOld>(number_);
     case kString:
       return string_->string();
     case kSymbol:

@@ -20,10 +20,11 @@
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "spawn_sync.h"
-#include "debug_utils.h"
+#include "debug_utils-inl.h"
 #include "env-inl.h"
 #include "node_internals.h"
 #include "string_bytes.h"
+#include "util-inl.h"
 
 #include <cstring>
 

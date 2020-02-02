@@ -45,7 +45,6 @@
 #if defined(NODE_HAVE_I18N_SUPPORT)
 
 #include "base_object-inl.h"
-#include "env-inl.h"
 #include "node.h"
 #include "node_buffer.h"
 #include "node_errors.h"
@@ -96,6 +95,7 @@ using v8::NewStringType;
 using v8::Object;
 using v8::ObjectTemplate;
 using v8::String;
+using v8::Uint8Array;
 using v8::Value;
 
 namespace i18n {
@@ -206,19 +206,18 @@ class ConverterObject : public BaseObject, Converter {
 
     ConverterObject* converter;
     ASSIGN_OR_RETURN_UNWRAP(&converter, args[0].As<Object>());
-    SPREAD_BUFFER_ARG(args[1], input_obj);
+    ArrayBufferViewContents<char> input(args[1]);
     int flags = args[2]->Uint32Value(env->context()).ToChecked();
 
     UErrorCode status = U_ZERO_ERROR;
     MaybeStackBuffer<UChar> result;
     MaybeLocal<Object> ret;
-    size_t limit = ucnv_getMinCharSize(converter->conv) *
-                   input_obj_length;
+    size_t limit = ucnv_getMinCharSize(converter->conv) * input.length();
     if (limit > 0)
       result.AllocateSufficientStorage(limit);
 
     UBool flush = (flags & CONVERTER_FLAGS_FLUSH) == CONVERTER_FLAGS_FLUSH;
-    OnScopeLeave cleanup([&]() {
+    auto cleanup = OnScopeLeave([&]() {
       if (flush) {
         // Reset the converter state.
         converter->bomSeen_ = false;
@@ -226,16 +225,8 @@ class ConverterObject : public BaseObject, Converter {
       }
     });
 
-    const char* source = input_obj_data;
-    size_t source_length = input_obj_length;
-
-    if (converter->unicode_ && !converter->ignoreBOM_ && !converter->bomSeen_) {
-      int32_t bomOffset = 0;
-      ucnv_detectUnicodeSignature(source, source_length, &bomOffset, &status);
-      source += bomOffset;
-      source_length -= bomOffset;
-      converter->bomSeen_ = true;
-    }
+    const char* source = input.data();
+    size_t source_length = input.length();
 
     UChar* target = *result;
     ucnv_toUnicode(converter->conv,
@@ -244,10 +235,34 @@ class ConverterObject : public BaseObject, Converter {
                    nullptr, flush, &status);
 
     if (U_SUCCESS(status)) {
-      if (limit > 0)
+      bool omit_initial_bom = false;
+      if (limit > 0) {
         result.SetLength(target - &result[0]);
+        if (result.length() > 0 &&
+            converter->unicode_ &&
+            !converter->ignoreBOM_ &&
+            !converter->bomSeen_) {
+          // If the very first result in the stream is a BOM, and we are not
+          // explicitly told to ignore it, then we mark it for discarding.
+          if (result[0] == 0xFEFF) {
+            omit_initial_bom = true;
+          }
+          converter->bomSeen_ = true;
+        }
+      }
       ret = ToBufferEndian(env, &result);
-      args.GetReturnValue().Set(ret.ToLocalChecked());
+      if (omit_initial_bom && !ret.IsEmpty()) {
+        // Peform `ret = ret.slice(2)`.
+        CHECK(ret.ToLocalChecked()->IsUint8Array());
+        Local<Uint8Array> orig_ret = ret.ToLocalChecked().As<Uint8Array>();
+        ret = Buffer::New(env,
+                          orig_ret->Buffer(),
+                          orig_ret->ByteOffset() + 2,
+                          orig_ret->ByteLength() - 2)
+                              .FromMaybe(Local<Uint8Array>());
+      }
+      if (!ret.IsEmpty())
+        args.GetReturnValue().Set(ret.ToLocalChecked());
       return;
     }
 
@@ -456,8 +471,7 @@ void Transcode(const FunctionCallbackInfo<Value>&args) {
   UErrorCode status = U_ZERO_ERROR;
   MaybeLocal<Object> result;
 
-  CHECK(Buffer::HasInstance(args[0]));
-  SPREAD_BUFFER_ARG(args[0], ts_obj);
+  ArrayBufferViewContents<char> input(args[0]);
   const enum encoding fromEncoding = ParseEncoding(isolate, args[1], BUFFER);
   const enum encoding toEncoding = ParseEncoding(isolate, args[2], BUFFER);
 
@@ -491,7 +505,7 @@ void Transcode(const FunctionCallbackInfo<Value>&args) {
     }
 
     result = tfn(env, EncodingName(fromEncoding), EncodingName(toEncoding),
-                 ts_obj_data, ts_obj_length, &status);
+                 input.data(), input.length(), &status);
   } else {
     status = U_ILLEGAL_ARGUMENT_ERROR;
   }
@@ -658,7 +672,7 @@ static void ToUnicode(const FunctionCallbackInfo<Value>& args) {
   int32_t len = ToUnicode(&buf, *val, val.length());
 
   if (len < 0) {
-    return env->ThrowError("Cannot convert name to Unicode");
+    return THROW_ERR_INVALID_ARG_VALUE(env, "Cannot convert name to Unicode");
   }
 
   args.GetReturnValue().Set(
@@ -681,7 +695,7 @@ static void ToASCII(const FunctionCallbackInfo<Value>& args) {
   int32_t len = ToASCII(&buf, *val, val.length(), mode);
 
   if (len < 0) {
-    return env->ThrowError("Cannot convert name to ASCII");
+    return THROW_ERR_INVALID_ARG_VALUE(env, "Cannot convert name to ASCII");
   }
 
   args.GetReturnValue().Set(
@@ -714,16 +728,6 @@ static void ToASCII(const FunctionCallbackInfo<Value>& args) {
 // Refs: https://github.com/KDE/konsole/blob/8c6a5d13c0/src/konsole_wcwidth.cpp#L101-L223
 static int GetColumnWidth(UChar32 codepoint,
                           bool ambiguous_as_full_width = false) {
-  const auto zero_width_mask = U_GC_CC_MASK |  // C0/C1 control code
-                               U_GC_CF_MASK |  // Format control character
-                               U_GC_ME_MASK |  // Enclosing mark
-                               U_GC_MN_MASK;   // Nonspacing mark
-  if (codepoint != 0x00AD &&  // SOFT HYPHEN is Cf but not zero-width
-      ((U_MASK(u_charType(codepoint)) & zero_width_mask) ||
-       u_hasBinaryProperty(codepoint, UCHAR_EMOJI_MODIFIER))) {
-    return 0;
-  }
-
   // UCHAR_EAST_ASIAN_WIDTH is the Unicode property that identifies a
   // codepoint as being full width, wide, ambiguous, neutral, narrow,
   // or halfwidth.
@@ -747,6 +751,15 @@ static int GetColumnWidth(UChar32 codepoint,
     case U_EA_HALFWIDTH:
     case U_EA_NARROW:
     default:
+      const auto zero_width_mask = U_GC_CC_MASK |  // C0/C1 control code
+                                  U_GC_CF_MASK |  // Format control character
+                                  U_GC_ME_MASK |  // Enclosing mark
+                                  U_GC_MN_MASK;   // Nonspacing mark
+      if (codepoint != 0x00AD &&  // SOFT HYPHEN is Cf but not zero-width
+          ((U_MASK(u_charType(codepoint)) & zero_width_mask) ||
+          u_hasBinaryProperty(codepoint, UCHAR_EMOJI_MODIFIER))) {
+        return 0;
+      }
       return 1;
   }
 }
@@ -754,18 +767,10 @@ static int GetColumnWidth(UChar32 codepoint,
 // Returns the column width for the given String.
 static void GetStringWidth(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
-  if (args.Length() < 1)
-    return;
+  CHECK(args[0]->IsString());
 
   bool ambiguous_as_full_width = args[1]->IsTrue();
-  bool expand_emoji_sequence = args[2]->IsTrue();
-
-  if (args[0]->IsNumber()) {
-    uint32_t val;
-    if (!args[0]->Uint32Value(env->context()).To(&val)) return;
-    args.GetReturnValue().Set(GetColumnWidth(val, ambiguous_as_full_width));
-    return;
-  }
+  bool expand_emoji_sequence = !args[2]->IsBoolean() || args[2]->IsTrue();
 
   TwoByteValue value(env->isolate(), args[0]);
   // reinterpret_cast is required by windows to compile
@@ -790,6 +795,7 @@ static void GetStringWidth(const FunctionCallbackInfo<Value>& args) {
     // in advance if a particular sequence is going to be supported.
     // The expand_emoji_sequence option allows the caller to skip this
     // check and count each code within an emoji sequence separately.
+    // https://www.unicode.org/reports/tr51/tr51-16.html#Emoji_ZWJ_Sequences
     if (!expand_emoji_sequence &&
         n > 0 && p == 0x200d &&  // 0x200d == ZWJ (zero width joiner)
         (u_hasBinaryProperty(c, UCHAR_EMOJI_PRESENTATION) ||

@@ -541,14 +541,23 @@ void RunNonConstIndexTest(ExecutionTier execution_tier, WasmOpcode wasm_op,
            static_cast<uint32_t>(r.builder().ReadMemory(&memory[0])));
 }
 
+// Test a set of Narrow operations
 #define TEST_OPERATION(Name)                                               \
-  WASM_EXEC_TEST(I64AtomicConstIndex##Name) {                              \
+  WASM_EXEC_TEST(I64AtomicConstIndex##Name##Narrow) {                      \
     RunNonConstIndexTest(execution_tier, kExprI64Atomic##Name##32U, Name); \
   }
 OPERATION_LIST(TEST_OPERATION)
 #undef TEST_OPERATION
 
-WASM_EXEC_TEST(I64AtomicNonConstIndexCompareExchange) {
+// Test a set of Regular operations
+#define TEST_OPERATION(Name)                                          \
+  WASM_EXEC_TEST(I64AtomicConstIndex##Name) {                         \
+    RunNonConstIndexTest(execution_tier, kExprI64Atomic##Name, Name); \
+  }
+OPERATION_LIST(TEST_OPERATION)
+#undef TEST_OPERATION
+
+WASM_EXEC_TEST(I64AtomicNonConstIndexCompareExchangeNarrow) {
   EXPERIMENTAL_FLAG_SCOPE(threads);
   WasmRunner<uint32_t, uint64_t, uint64_t> r(execution_tier);
   uint64_t* memory =
@@ -565,6 +574,25 @@ WASM_EXEC_TEST(I64AtomicNonConstIndexCompareExchange) {
   CHECK_EQ(static_cast<uint16_t>(initial), r.Call(initial, local));
   CHECK_EQ(static_cast<uint16_t>(CompareExchange(initial, initial, local)),
            static_cast<uint16_t>(r.builder().ReadMemory(&memory[0])));
+}
+
+WASM_EXEC_TEST(I64AtomicNonConstIndexCompareExchange) {
+  EXPERIMENTAL_FLAG_SCOPE(threads);
+  WasmRunner<uint32_t, uint64_t, uint64_t> r(execution_tier);
+  uint64_t* memory =
+      r.builder().AddMemoryElems<uint64_t>(kWasmPageSize / sizeof(uint64_t));
+  r.builder().SetHasSharedMemory();
+
+  BUILD(r, WASM_I32_CONVERT_I64(WASM_ATOMICS_TERNARY_OP(
+               kExprI64AtomicCompareExchange,
+               WASM_I64_EQ(WASM_I64V(1), WASM_I64V(0)), WASM_GET_LOCAL(0),
+               WASM_GET_LOCAL(1), MachineRepresentation::kWord16)));
+
+  uint64_t initial = 4444333322221111, local = 0x9999888877776666;
+  r.builder().WriteMemory(&memory[0], initial);
+  CHECK_EQ(static_cast<uint32_t>(initial), r.Call(initial, local));
+  CHECK_EQ(CompareExchange(initial, initial, local),
+           r.builder().ReadMemory(&memory[0]));
 }
 
 WASM_EXEC_TEST(I64AtomicNonConstIndexLoad8U) {
@@ -616,6 +644,54 @@ WASM_EXEC_TEST(I64AtomicCompareExchange32UFail) {
   CHECK_EQ(static_cast<uint32_t>(initial), r.Call(test, local));
   // No memory change on failed compare exchange
   CHECK_EQ(initial, r.builder().ReadMemory(&memory[0]));
+}
+
+WASM_EXEC_TEST(AtomicStoreNoConsideredEffectful) {
+  EXPERIMENTAL_FLAG_SCOPE(threads);
+  FLAG_wasm_trap_handler = false;  // To use {Load} instead of {ProtectedLoad}.
+  WasmRunner<uint32_t> r(execution_tier);
+  r.builder().AddMemoryElems<int64_t>(kWasmPageSize / sizeof(int64_t));
+  r.builder().SetHasSharedMemory();
+  BUILD(r, WASM_LOAD_MEM(MachineType::Int64(), WASM_ZERO),
+        WASM_ATOMICS_STORE_OP(kExprI64AtomicStore, WASM_ZERO, WASM_I64V(20),
+                              MachineRepresentation::kWord64),
+        kExprI64Eqz);
+  CHECK_EQ(1, r.Call());
+}
+
+void RunNoEffectTest(ExecutionTier execution_tier, WasmOpcode wasm_op) {
+  EXPERIMENTAL_FLAG_SCOPE(threads);
+  FLAG_wasm_trap_handler = false;  // To use {Load} instead of {ProtectedLoad}.
+  WasmRunner<uint32_t> r(execution_tier);
+  r.builder().AddMemoryElems<int64_t>(kWasmPageSize / sizeof(int64_t));
+  r.builder().SetHasSharedMemory();
+  BUILD(r, WASM_LOAD_MEM(MachineType::Int64(), WASM_ZERO),
+        WASM_ATOMICS_BINOP(wasm_op, WASM_ZERO, WASM_I64V(20),
+                           MachineRepresentation::kWord64),
+        WASM_DROP, kExprI64Eqz);
+  CHECK_EQ(1, r.Call());
+}
+
+WASM_EXEC_TEST(AtomicAddNoConsideredEffectful) {
+  RunNoEffectTest(execution_tier, kExprI64AtomicAdd);
+}
+
+WASM_EXEC_TEST(AtomicExchangeNoConsideredEffectful) {
+  RunNoEffectTest(execution_tier, kExprI64AtomicExchange);
+}
+
+WASM_EXEC_TEST(AtomicCompareExchangeNoConsideredEffectful) {
+  EXPERIMENTAL_FLAG_SCOPE(threads);
+  FLAG_wasm_trap_handler = false;  // To use {Load} instead of {ProtectedLoad}.
+  WasmRunner<uint32_t> r(execution_tier);
+  r.builder().AddMemoryElems<uint64_t>(kWasmPageSize / sizeof(uint64_t));
+  r.builder().SetHasSharedMemory();
+  BUILD(r, WASM_LOAD_MEM(MachineType::Int64(), WASM_ZERO),
+        WASM_ATOMICS_TERNARY_OP(kExprI64AtomicCompareExchange, WASM_ZERO,
+                                WASM_I64V(0), WASM_I64V(30),
+                                MachineRepresentation::kWord64),
+        WASM_DROP, kExprI64Eqz);
+  CHECK_EQ(1, r.Call());
 }
 
 }  // namespace test_run_wasm_atomics_64
